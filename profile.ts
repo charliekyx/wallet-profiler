@@ -29,6 +29,12 @@ const CONFIG = {
 
     // 回溯缓冲：因为使用了精准的 Binary Search，这里只需要很小的缓冲 (约 5 分钟)
     LOOKBACK_BUFFER_BLOCKS: 150,
+
+    // [New] 自动清洗配置 (Bot/死号过滤)
+    FILTER_MAX_TOTAL_NONCE: 5000, // 历史总交易过高 -> Bot
+    FILTER_RECENT_DAYS: 7,        // 检查最近 7 天
+    FILTER_MIN_WEEKLY_TXS: 1,     // 7天内至少 1 笔交易 -> 排除死号
+    FILTER_MAX_WEEKLY_TXS: 100,   // 7天内超过 100 笔 -> 排除高频 Bot
 };
 
 // ================= [Core Logic] =================
@@ -109,8 +115,9 @@ async function main() {
         }
     }
 
-    // 3. 输出精英名单
-    exportProfileData(walletHits);
+    // 3. 自动清洗 (去除 Bot 和 死号)
+    const cleanedHits = await filterWallets(provider, walletHits);
+    exportProfileData(cleanedHits);
 }
 
 // --- Helper: Get Token Age ---
@@ -226,6 +233,63 @@ async function getBlockByTimestamp(
         }
     }
     return closestBlock;
+}
+
+// --- Module: Auto Filter (Integrated) ---
+async function filterWallets(
+    provider: ethers.providers.JsonRpcProvider,
+    hits: Record<string, string[]>
+): Promise<Record<string, string[]>> {
+    const candidates = Object.keys(hits);
+    const validHits: Record<string, string[]> = {};
+    
+    console.log(`\n[Filter] Auditing ${candidates.length} candidates (Bot/Inactive Check)...`);
+    
+    const currentBlock = await provider.getBlockNumber();
+    const blocksPerDay = 43200; 
+    const pastBlock = currentBlock - (blocksPerDay * CONFIG.FILTER_RECENT_DAYS);
+
+    let passed = 0;
+
+    for (let i = 0; i < candidates.length; i++) {
+        const wallet = candidates[i];
+        // 简单的进度条
+        if (i % 5 === 0) process.stdout.write(`.`);
+        
+        const isValid = await auditWallet(provider, wallet, pastBlock, currentBlock);
+        if (isValid) {
+            validHits[wallet] = hits[wallet];
+            passed++;
+        }
+    }
+    console.log(`\n[Filter] Passed: ${passed} / ${candidates.length} (Removed ${candidates.length - passed} bots/inactive)`);
+    return validHits;
+}
+
+async function auditWallet(
+    provider: ethers.providers.JsonRpcProvider, 
+    address: string, 
+    pastBlock: number, 
+    currentBlock: number
+): Promise<boolean> {
+    try {
+        const code = await provider.getCode(address);
+        if (code !== '0x') return false; // 是合约
+
+        const nonceNow = await provider.getTransactionCount(address, currentBlock);
+        if (nonceNow > CONFIG.FILTER_MAX_TOTAL_NONCE) return false; // 老牌 Bot
+        if (nonceNow < 2) return false; // 新号/Burner
+
+        const noncePast = await provider.getTransactionCount(address, pastBlock);
+        const delta = nonceNow - noncePast;
+        
+        if (delta < CONFIG.FILTER_MIN_WEEKLY_TXS) return false; // 死号 (0x3f59...)
+        if (delta > CONFIG.FILTER_MAX_WEEKLY_TXS) return false; // 高频 Bot (0x404e...)
+
+        return true;
+    } catch (e) {
+        return false;
+    }
 }
 
 // --- Module: Reporting ---
