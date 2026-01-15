@@ -27,14 +27,14 @@ const CONFIG = {
     // 对于老币，放宽一点，因为早期流动性可能还没加满
     SNIPE_WINDOW_BLOCKS: 900,
 
-    // 回溯缓冲：因为使用了精准的 Binary Search，这里只需要很小的缓冲 (约 5 分钟)
-    LOOKBACK_BUFFER_BLOCKS: 150,
+    // 回溯缓冲：稍微加大一点，防止开盘时间偏差
+    LOOKBACK_BUFFER_BLOCKS: 300,
 
     // [New] 自动清洗配置 (Bot/死号过滤)
     FILTER_MAX_TOTAL_NONCE: 5000, // 历史总交易过高 -> Bot
-    FILTER_RECENT_DAYS: 7,        // 检查最近 7 天
-    FILTER_MIN_WEEKLY_TXS: 1,     // 7天内至少 1 笔交易 -> 排除死号
-    FILTER_MAX_WEEKLY_TXS: 500,   // 放宽阈值：7天内超过 500 笔才算 Bot (平均每天 ~70 笔)
+    FILTER_RECENT_DAYS: 1,        // [Modified] 降为 1 天，防止非归档节点报错
+    FILTER_MIN_WEEKLY_TXS: 0,     // [Modified] 1天内允许 0 交易 (避免误杀)
+    FILTER_MAX_WEEKLY_TXS: 100,   // [Modified] 1天内 >100 笔视为 Bot
 };
 
 // ================= [Core Logic] =================
