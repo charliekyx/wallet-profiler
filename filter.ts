@@ -9,7 +9,7 @@ const CONFIG = {
     // [硬指标 1] 历史总交易数 (Total Nonce)
     // Base 链才不到2年，普通人手动操作很难超过 3000 次
     // 调低这个阈值，直接过滤老牌 Bot
-    MAX_TOTAL_NONCE: 3000, 
+    MAX_TOTAL_NONCE: 5000, 
 
     // [硬指标 2] 近期活跃窗口 (天)
     RECENT_WINDOW_DAYS: 7,
@@ -17,8 +17,8 @@ const CONFIG = {
     // [硬指标 3] 窗口内的实际交易笔数 (Real Tx Count)
     // 包含了：转账、Swap、调用合约、失败的交易、取消的交易
     // 这是最真实的活跃度指标
-    MIN_WEEKLY_TXS: 1,    // 至少活过
-    MAX_WEEKLY_TXS: 60,   // 平均每天 < 8-9 笔交易。超过这个大概率是程序化交易
+    MIN_WEEKLY_TXS: 0,    // [Modified] 暂时允许不活跃，寻找钻石手
+    MAX_WEEKLY_TXS: 200,   // [Modified] 放宽高频限制
 };
 
 // ================= [Core Logic] =================

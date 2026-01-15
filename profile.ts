@@ -6,35 +6,33 @@ import * as fs from "fs";
 
 // ================= [Configuration V3: Deep Dive] =================
 
-const RPC_URL = "http://127.0.0.1:8545";
-
-// 🎯 Base 链历史级金狗 (人工精选)
-// 这些是已经百倍千倍的币，能抓到它们的早期买家才是真神
-const GOLDEN_DOGS = [
-    { name: "BRETT", address: "0x532f27101965dd16442e59d40670faf5ebb142e4", fallbackTime: 1708820000 }, // Feb 2024
-    { name: "DEGEN", address: "0x4ed4e862860bed51a9570b96d89af5e1b0efefed", fallbackTime: 1704670000 }, // Jan 2024
-    { name: "TOSHI", address: "0xac1bd2486aaf3b5c0fc3fd868558b082a531b2b4", fallbackTime: 1691530000 }, // Aug 2023
-    { name: "VIRTUAL", address: "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b", fallbackTime: 1727740000 }, // Oct 2024
-    { name: "KEYCAT", address: "0x9a26f5433671751c3276a065f57e5a02d281797d", fallbackTime: 1711060000 }, // Mar 2024 (Fixed Checksum)
-];
+// 建议使用 Alchemy/Infura 等支持 Archive 模式的节点以查询历史数据
+const RPC_URL = "https://base-mainnet.g.alchemy.com/v2/Dy8qDdgHXfCqzP-o1Bw2X";
 
 const CONFIG = {
-    // 寻找多少个共同点？
-    // 如果一个钱包命中了 2 个以上历史金狗，绝对是顶级高手
-    MIN_HIT_COUNT: 2,
+    // 1. 命中门槛：先降为 1，确保至少能看到数据，不要上来就要求重合
+    MIN_HIT_COUNT: 1, 
 
-    // 狙击窗口：开盘后 900 个块 (约 30 分钟)
-    // 对于老币，放宽一点，因为早期流动性可能还没加满
+    // 2. 狙击窗口：900 块 (30分钟) 是合理的
     SNIPE_WINDOW_BLOCKS: 900,
 
-    // 回溯缓冲：稍微加大一点，防止开盘时间偏差
-    LOOKBACK_BUFFER_BLOCKS: 300,
+    // 3. 回溯缓冲：加大一点，防止因为区块时间偏差漏掉开盘
+    LOOKBACK_BUFFER_BLOCKS: 3000, 
 
-    // [New] 自动清洗配置 (Bot/死号过滤)
-    FILTER_MAX_TOTAL_NONCE: 5000, // 历史总交易过高 -> Bot
-    FILTER_RECENT_DAYS: 1,        // [Modified] 降为 1 天，防止非归档节点报错
-    FILTER_MIN_WEEKLY_TXS: 0,     // [Modified] 1天内允许 0 交易 (避免误杀)
-    FILTER_MAX_WEEKLY_TXS: 100,   // [Modified] 1天内 >100 笔视为 Bot
+    // 4. 清洗逻辑 (放宽！)
+    FILTER_MAX_TOTAL_NONCE: 5000, 
+    
+    // [关键修改]：检查过去 7 天的活跃度，而不是 3 天
+    FILTER_RECENT_DAYS: 7,        
+    
+    // [关键修改]：暂时允许不活跃 (0)，因为我们要找的是持有者，不一定是高频交易员
+    FILTER_MIN_WEEKLY_TXS: 0,     
+    
+    FILTER_MAX_WEEKLY_TXS: 200,    
+    
+    // [关键修改]：Alchemy 付费/免费版通常支持 2000-10000 区块范围
+    // 设为 2000 可以极大提升扫描速度。但 Alchemy Free Tier 限制为 10。
+    RPC_CHUNK_SIZE: 10,           
 };
 
 // ================= [Core Logic] =================
@@ -66,7 +64,7 @@ async function main() {
 
     console.log(`\n[System] 🚀 Wallet Profiler V3 (Golden Dog Edition)`);
     console.log(`[System] Node Connection: ${RPC_URL}`);
-    console.log(`[System] Targets: ${GOLDEN_DOGS.map((t) => t.name).join(", ")}`);
+    console.log(`[System] Targets: (Loading from file or defaults...)`);
 
     const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
     let currentBlock = 0;
@@ -80,9 +78,31 @@ async function main() {
 
     const walletHits: Record<string, string[]> = {};
 
-    for (let i = 0; i < GOLDEN_DOGS.length; i++) {
-        const target = GOLDEN_DOGS[i];
-        process.stdout.write(`\n[${i + 1}/${GOLDEN_DOGS.length}] 🕵️  Analyzing ${target.name}... `);
+    // 尝试读取 trending_dogs.json
+    let targets: any[] = [];
+    try {
+        if (fs.existsSync("trending_dogs.json")) {
+            const data = fs.readFileSync("trending_dogs.json", "utf-8");
+            targets = JSON.parse(data);
+            if (targets.length === 0) {
+                console.log(`[System] ⚠️ trending_dogs.json is empty. No fresh dogs found.`);
+                console.log(`[System] Exiting pipeline to save time (as requested).`);
+                process.exit(0);
+            } else {
+                console.log(`[System] Loaded ${targets.length} trending dogs from file.`);
+            }
+        } else {
+            console.log(`[System] trending_dogs.json not found. Exiting.`);
+            process.exit(0);
+        }
+    } catch (e) {
+        console.error(`[System] Error reading trending_dogs.json: ${(e as any).message}`);
+        process.exit(1);
+    }
+
+    for (let i = 0; i < targets.length; i++) {
+        const target = targets[i];
+        process.stdout.write(`\n[${i + 1}/${targets.length}] 🕵️  Analyzing ${target.name}... `);
 
         try {
             // 1. 获取代币创建时间 (为了计算区块高度)
@@ -168,12 +188,7 @@ async function traceEarlyBuyers(
     // 搜索结束 = 开始 + 狙击窗口
     const searchEnd = startBlock + CONFIG.SNIPE_WINDOW_BLOCKS;
 
-    const logs = await provider.getLogs({
-        address: address,
-        topics: [TRANSFER_TOPIC],
-        fromBlock: searchStart,
-        toBlock: searchEnd,
-    });
+    const logs = await getLogsInChunks(provider, searchStart, searchEnd, address, TRANSFER_TOPIC);
 
     if (logs.length === 0) return buyers;
 
@@ -233,6 +248,39 @@ async function getBlockByTimestamp(
         }
     }
     return closestBlock;
+}
+
+// --- Helper: Get Logs in Chunks (Fix for RPC Limits) ---
+async function getLogsInChunks(
+    provider: ethers.providers.JsonRpcProvider,
+    fromBlock: number,
+    toBlock: number,
+    address: string,
+    topic: string
+): Promise<ethers.providers.Log[]> {
+    const allLogs: ethers.providers.Log[] = [];
+    let start = fromBlock;
+    
+    // Alchemy Free Tier limit is strict (10 blocks). 
+    // If using other RPCs, you can increase CONFIG.RPC_CHUNK_SIZE to 2000.
+    const chunkSize = CONFIG.RPC_CHUNK_SIZE; 
+
+    while (start <= toBlock) {
+        const end = Math.min(start + chunkSize - 1, toBlock);
+        try {
+            const logs = await provider.getLogs({
+                address: address,
+                topics: [topic],
+                fromBlock: start,
+                toBlock: end,
+            });
+            allLogs.push(...logs);
+        } catch (e) {
+            console.log(`   ⚠️ Chunk failed [${start}-${end}]: ${(e as any).message.slice(0, 50)}...`);
+        }
+        start += chunkSize;
+    }
+    return allLogs;
 }
 
 // --- Module: Auto Filter (Integrated) ---
@@ -310,15 +358,16 @@ async function auditWallet(
         if (nonceNow < 2) return { pass: false, reason: "Total Nonce Low" };
 
         // Try historical lookup
-        let noncePast = 0;
+        let delta = -1;
         try {
-            noncePast = await provider.getTransactionCount(address, pastBlock);
+            const noncePast = await provider.getTransactionCount(address, pastBlock);
+            delta = nonceNow - noncePast;
         } catch (e) {
-            return { pass: false, reason: "RPC Error (History)" };
+            // [Strict Mode] 如果节点不支持历史查询，直接视为失败，防止僵尸号混入
+            return { pass: false, reason: "RPC Error (History Missing - Use Archive Node)" };
         }
 
-        const delta = nonceNow - noncePast;
-        
+        // 只有在成功获取到 delta 时才进行活跃度检查
         if (delta < CONFIG.FILTER_MIN_WEEKLY_TXS) return { pass: false, reason: "Inactive" };
         if (delta > CONFIG.FILTER_MAX_WEEKLY_TXS) return { pass: false, reason: "High Freq" };
 

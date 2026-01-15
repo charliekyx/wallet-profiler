@@ -1,0 +1,17 @@
+[
+  {
+    "name": "MEL",
+    "address": "0x1ba597770e98c4f630ddbdc8b9e1a5cb1b4ca047",
+    "fallbackTime": 1768261399
+  },
+  {
+    "name": "LAUNCH",
+    "address": "0xece5d962d17901ef200da050c7c74ab45c96db07",
+    "fallbackTime": 1768354165
+  },
+  {
+    "name": "REGGIE",
+    "address": "0xa1ed16bd6e37f0bf201f674e41603815418e8453",
+    "fallbackTime": 1768340039
+  }
+]
