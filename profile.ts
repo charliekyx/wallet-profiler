@@ -30,8 +30,8 @@ const CONFIG = {
     
     FILTER_MAX_WEEKLY_TXS: 200,    
     
-    // [关键修改]：Alchemy 付费/免费版通常支持 2000-10000 区块范围
-    // 设为 2000 可以极大提升扫描速度。但 Alchemy Free Tier 限制为 10。
+    // [重要修复]：对于热门代币（Golden Dogs），1000 区块内的交易量极易超过 Alchemy 的 10k 条日志限制。
+    // 导致 RPC 返回 400 错误。将分片大小降低到 50 是最稳妥的选择。
     RPC_CHUNK_SIZE: 10,           
 };
 
@@ -66,7 +66,9 @@ async function main() {
     console.log(`[System] Node Connection: ${RPC_URL}`);
     console.log(`[System] Targets: (Loading from file or defaults...)`);
 
-    const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
+    // 使用 StaticJsonRpcProvider 替代 JsonRpcProvider。
+    // 这可以避免 ethers 频繁调用 eth_chainId 导致的 "could not detect network" 错误，特别是在使用 Alchemy 等稳定节点时。
+    const provider = new ethers.providers.StaticJsonRpcProvider(RPC_URL);
     let currentBlock = 0;
     try {
         currentBlock = await provider.getBlockNumber();
@@ -240,6 +242,10 @@ async function getBlockByTimestamp(
     while (min <= max) {
         const mid = Math.floor((min + max) / 2);
         const block = await provider.getBlock(mid);
+        
+        // 避免请求过快触发 Alchemy 的频率限制 (Compute Units per second)
+        await new Promise(resolve => setTimeout(resolve, 100));
+
         if (block.timestamp < targetTimestamp) {
             min = mid + 1;
         } else {
@@ -267,16 +273,26 @@ async function getLogsInChunks(
 
     while (start <= toBlock) {
         const end = Math.min(start + chunkSize - 1, toBlock);
-        try {
-            const logs = await provider.getLogs({
-                address: address,
-                topics: [topic],
-                fromBlock: start,
-                toBlock: end,
-            });
-            allLogs.push(...logs);
-        } catch (e) {
-            console.log(`   ⚠️ Chunk failed [${start}-${end}]: ${(e as any).message.slice(0, 50)}...`);
+        let retries = 3;
+        while (retries > 0) {
+            try {
+                const logs = await provider.getLogs({
+                    address: address,
+                    topics: [topic],
+                    fromBlock: start,
+                    toBlock: end,
+                });
+                allLogs.push(...logs);
+                break; // 成功则跳出重试循环
+            } catch (e) {
+                retries--;
+                if (retries === 0) {
+                    console.log(`   ⚠️ Chunk failed [${start}-${end}] after 3 attempts: ${(e as any).message.slice(0, 50)}...`);
+                } else {
+                    // 遇到错误（如频率限制）时等待 1 秒后重试
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
+            }
         }
         start += chunkSize;
     }
