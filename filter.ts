@@ -1,31 +1,25 @@
 import { ethers } from 'ethers';
 import * as fs from 'fs';
 
-// ================= [Filter Configuration] =================
+// ================= [Filter Configuration V2] =================
 
 const RPC_URL = 'http://127.0.0.1:8545'; 
 
 const CONFIG = {
-    // [阈值 1] Nonce (总交易数)
-    // 超过这个数通常是 交易所热钱包 或 长期运行的 Arb Bot
-    MAX_NONCE: 10000, 
+    // [硬指标 1] 历史总交易数 (Total Nonce)
+    // Base 链才不到2年，普通人手动操作很难超过 3000 次
+    // 调低这个阈值，直接过滤老牌 Bot
+    MAX_TOTAL_NONCE: 3000, 
 
-    // [阈值 2] 近期活跃窗口 (天)
-    // 检查最近 N 天的表现
+    // [硬指标 2] 近期活跃窗口 (天)
     RECENT_WINDOW_DAYS: 7,
 
-    // [阈值 3] 近期交易量范围 (Tx Count in Window)
-    // 少于 MIN: 死号/休眠号 (跟单没意义)
-    // 多于 MAX: 高频 Bot (跟单会亏死 Gas)
-    MIN_RECENT_TXS: 1, 
-    MAX_RECENT_TXS: 150, // 平均每天允许 20 多笔，超过这个大概率是疯狗 Bot
+    // [硬指标 3] 窗口内的实际交易笔数 (Real Tx Count)
+    // 包含了：转账、Swap、调用合约、失败的交易、取消的交易
+    // 这是最真实的活跃度指标
+    MIN_WEEKLY_TXS: 1,    // 至少活过
+    MAX_WEEKLY_TXS: 60,   // 平均每天 < 8-9 笔交易。超过这个大概率是程序化交易
 };
-
-// 填入你 V3 脚本跑出来的地址，或者读取文件
-// 这里示例填入几个，实际使用时脚本会自动读取 saved file
-const MANUAL_CANDIDATES: string[] = [
-    // 在这里粘贴你抓到的那 107 个地址，或者留空让脚本读取文件
-];
 
 // ================= [Core Logic] =================
 
@@ -36,30 +30,43 @@ async function main() {
         process.exit(1);
     }
 
-    console.log(`\n[System] 🧹 Wallet Filter System (Bot Remover)`);
+    console.log(`\n[System] 🧹 Wallet Filter System V2 (Nonce Delta Edition)`);
     console.log(`[System] Node: ${RPC_URL}`);
     
     const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
     
-    // 1. 获取候选名单 (优先读取本地文件，没有则使用上方数组)
+    // 1. 检查节点连接 & 获取当前区块
+    let currentBlock = 0;
+    try {
+        currentBlock = await provider.getBlockNumber();
+        console.log(`[System] Current Block: ${currentBlock}`);
+    } catch (e) {
+        console.error(`[Fatal] Cannot connect to RPC.`);
+        process.exit(1);
+    }
+
+    // 2. 加载名单
     let candidates = await loadCandidates();
+    // 如果文件没读到，使用测试用的 Manual List
     if (candidates.length === 0) {
-        console.log(`[Warn] No candidates found in file. Using manual list...`);
-        candidates = MANUAL_CANDIDATES;
+        // 这里为了方便你测试，我把你提到的那个 Bot 放进去，看看能不能杀掉
+        candidates = ["0x404e927b203375779a6abd52a2049ce0adf6609b"];
+        console.log(`[Test] Using manual candidate for testing...`);
     }
     
-    // 去重
     candidates = [...new Set(candidates.map(a => a.toLowerCase()))];
-    console.log(`[System] Loaded ${candidates.length} unique candidates for auditing.\n`);
+    console.log(`[System] Auditing ${candidates.length} candidates...\n`);
 
     const passedWallets: string[] = [];
+    const blocksPerDay = 43200; // Base ~2s/block
+    const startBlock = currentBlock - (blocksPerDay * CONFIG.RECENT_WINDOW_DAYS);
 
-    // 2. 逐个审计
+    // 3. 逐个审计
     for (let i = 0; i < candidates.length; i++) {
         const wallet = candidates[i];
-        process.stdout.write(`[${i + 1}/${candidates.length}] Auditing ${wallet.slice(0, 8)}... `);
+        process.stdout.write(`[${i + 1}/${candidates.length}] ${wallet.slice(0, 8)}... `);
         
-        const result = await auditWallet(provider, wallet);
+        const result = await auditWallet(provider, wallet, startBlock, currentBlock);
         
         if (result.pass) {
             console.log(`✅ PASS | ${result.reason}`);
@@ -69,68 +76,51 @@ async function main() {
         }
     }
 
-    // 3. 输出清洗后的名单
+    // 4. 输出
     exportCleanList(passedWallets);
 }
 
-// --- 审计核心函数 ---
-async function auditWallet(provider: ethers.providers.JsonRpcProvider, address: string) {
+// --- 审计核心函数 (V2: Delta Nonce) ---
+async function auditWallet(
+    provider: ethers.providers.JsonRpcProvider, 
+    address: string,
+    pastBlock: number,
+    currentBlock: number
+) {
     try {
-        // [Check 1] 是否是合约 (Smart Contract)
+        // [Check 1] 是否是合约
         const code = await provider.getCode(address);
-        if (code !== '0x') {
-            return { pass: false, reason: "Is Contract (Not EOA)" };
-        }
+        if (code !== '0x') return { pass: false, reason: "Is Contract" };
 
-        // [Check 2] Nonce 检查 (历史总交易量)
-        const nonce = await provider.getTransactionCount(address);
-        if (nonce > CONFIG.MAX_NONCE) {
-            return { pass: false, reason: `Nonce too high (${nonce}) - Likely Exchange/Bot` };
-        }
-        if (nonce < 1) { 
-             return { pass: false, reason: `Nonce too low (${nonce}) - Newbie/Burner` };
-        }
-
-        // [Check 3] 近期活跃度 (Log Scanning)
-        // 扫描最近 3 天的 Transfer 事件 (发送或接收)
-        const currentBlock = await provider.getBlockNumber();
-        const blocksPerDay = 43200; // Base ~2s block
-        const startBlock = currentBlock - (blocksPerDay * CONFIG.RECENT_WINDOW_DAYS);
+        // [Check 2] 现在的 Nonce (Total)
+        const nonceNow = await provider.getTransactionCount(address, currentBlock);
         
-        // 我们只查 "Transfer" 事件作为活跃度指标 (最轻量)
-        // topic0 = Transfer, topic1 = from (spending), topic2 = to (receiving)
-        // 只要这个地址出现在 topic1 或 topic2 里，就算活跃
-        const transferTopic = ethers.utils.id("Transfer(address,address,uint256)");
-        const hexAddress = ethers.utils.hexZeroPad(address, 32);
-
-        // 并行查询 Send 和 Receive (Base op-geth 索引很快)
-        const [logsFrom, logsTo] = await Promise.all([
-            provider.getLogs({
-                fromBlock: startBlock,
-                toBlock: 'latest',
-                topics: [transferTopic, hexAddress] // Sent
-            }),
-            provider.getLogs({
-                fromBlock: startBlock,
-                toBlock: 'latest',
-                topics: [transferTopic, null, hexAddress] // Received
-            })
-        ]);
-
-        const totalRecentTxs = logsFrom.length + logsTo.length;
-
-        if (totalRecentTxs < CONFIG.MIN_RECENT_TXS) {
-            return { pass: false, reason: `Inactive (${totalRecentTxs} txs in ${CONFIG.RECENT_WINDOW_DAYS}d)` };
+        if (nonceNow > CONFIG.MAX_TOTAL_NONCE) {
+            return { pass: false, reason: `Total Nonce High (${nonceNow} > ${CONFIG.MAX_TOTAL_NONCE})` };
+        }
+        if (nonceNow < 2) {
+            return { pass: false, reason: `Total Nonce Low (${nonceNow})` };
         }
 
-        if (totalRecentTxs > CONFIG.MAX_RECENT_TXS) {
-            return { pass: false, reason: `High Freq Bot (${totalRecentTxs} txs in ${CONFIG.RECENT_WINDOW_DAYS}d)` };
+        // [Check 3] 7天前的 Nonce (Past)
+        // 这是一个非常强大的 RPC 技巧，查看过去的快照
+        const noncePast = await provider.getTransactionCount(address, pastBlock);
+        
+        // 计算差值：这就是过去 7 天他真实发出的交易总数 (不管成功失败，不管是否有 Log)
+        const deltaNonce = nonceNow - noncePast;
+
+        if (deltaNonce < CONFIG.MIN_WEEKLY_TXS) {
+            return { pass: false, reason: `Inactive (${deltaNonce} txs in 7d)` };
         }
 
-        // [Pass] 
+        if (deltaNonce > CONFIG.MAX_WEEKLY_TXS) {
+            // 如果一周发了 100+ 笔交易，肯定是 Bot 或者疯狗
+            return { pass: false, reason: `High Freq (${deltaNonce} txs in 7d)` };
+        }
+
         return { 
             pass: true, 
-            reason: `Human Behavior (Nonce: ${nonce}, Recent: ${totalRecentTxs})` 
+            reason: `Human (Total: ${nonceNow}, 7d-Activity: ${deltaNonce})` 
         };
 
     } catch (e) {
@@ -138,55 +128,40 @@ async function auditWallet(provider: ethers.providers.JsonRpcProvider, address: 
     }
 }
 
-// --- 辅助：自动读取最新的 legends 文件 ---
 async function loadCandidates(): Promise<string[]> {
     const files = fs.readdirSync('.');
-    // 找最新的 legends_base_xxxx.txt
     const legendFiles = files.filter(f => f.startsWith('legends_base_') && f.endsWith('.txt'));
-    
     if (legendFiles.length === 0) return [];
-    
-    // 排序取最新的
     legendFiles.sort().reverse();
     const targetFile = legendFiles[0];
     console.log(`[System] Reading candidates from ${targetFile}`);
-    
     const content = fs.readFileSync(targetFile, 'utf-8');
     const wallets: string[] = [];
-    
-    // 解析文件行 [💎 2 Legends] 0x... | Bags: ...
     const lines = content.split('\n');
     for (const line of lines) {
         const match = line.match(/0x[a-fA-F0-9]{40}/);
-        if (match) {
-            wallets.push(match[0]);
-        }
+        if (match) wallets.push(match[0]);
     }
     return wallets;
 }
 
 function exportCleanList(wallets: string[]) {
-    console.log(`\n================ 🧬 VERIFIED HUMANS (${wallets.length}) 🧬 ================`);
-    
+    console.log(`\n================ 🧬 HUMAN VERIFIED (${wallets.length}) 🧬 ================`);
     if (wallets.length === 0) {
-        console.log("⚠️ No wallets passed the filter.");
-        return;
+        console.log("⚠️ All candidates were filtered out.");
+    } else {
+        const output = wallets.join(',');
+        const dateStr = new Date().toISOString().slice(0, 10);
+        const fileName = `verified_humans_${dateStr}.txt`;
+        fs.writeFileSync(fileName, output);
+        
+        // 同时保存一个可读列表
+        const readable = wallets.join('\n');
+        fs.writeFileSync(fileName.replace('.txt', '_list.txt'), readable);
+
+        console.log(`✅ Saved clean list to ${fileName}`);
+        console.log(`👉 TARGET_WALLETS=${output}`);
     }
-
-    const dateStr = new Date().toISOString().slice(0, 10);
-    const fileName = `verified_humans_${dateStr}.txt`;
-    
-    // 格式化输出
-    const output = wallets.join(',');
-    fs.writeFileSync(fileName, output); // 方便直接复制到 .env
-    
-    // 同时保存一个可读列表
-    const readable = wallets.join('\n');
-    fs.writeFileSync(fileName.replace('.txt', '_list.txt'), readable);
-
-    console.log(`✅ Saved clean list to ${fileName}`);
-    console.log(`👉 Copy this to your .env:\n`);
-    console.log(`TARGET_WALLETS=${output}`);
 }
 
 main().catch(console.error);
