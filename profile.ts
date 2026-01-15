@@ -33,10 +33,10 @@ const CONFIG = {
 
 // ================= [Core Logic] =================
 
-// Standard Swap Event Topic (Uniswap V2/V3 compatible)
-let SWAP_TOPIC = "";
+// Standard Transfer Event Topic (ERC20)
+let TRANSFER_TOPIC = "";
 const LOG_ABI = [
-    "event Swap(address indexed sender, uint amount0In, uint amount1In, uint amount0Out, uint amount1Out, address indexed to)",
+    "event Transfer(address indexed from, address indexed to, uint256 value)",
 ];
 
 async function main() {
@@ -49,7 +49,7 @@ async function main() {
     }
 
     try {
-        SWAP_TOPIC = ethers.utils.id("Swap(address,uint256,uint256,uint256,uint256,address)");
+        TRANSFER_TOPIC = ethers.utils.id("Transfer(address,address,uint256)");
     } catch (e) {
         console.error(
             "[启动错误] ethers 初始化失败。你的 node_modules 可能安装了 ethers v6，但代码需要 v5。",
@@ -131,6 +131,8 @@ async function getCreationTime(address: string, fallback?: number): Promise<numb
                 return basePairs[0].pairCreatedAt;
             }
         }
+        // API 请求成功但没找到数据，也使用 Fallback
+        if (fallback) return fallback * 1000;
         return null;
     } catch (e) {
         if (fallback) return fallback * 1000; // Fallback to hardcoded time (ms)
@@ -160,14 +162,14 @@ async function traceEarlyBuyers(
 
     const logs = await provider.getLogs({
         address: address,
-        topics: [SWAP_TOPIC],
+        topics: [TRANSFER_TOPIC],
         fromBlock: searchStart,
         toBlock: searchEnd,
     });
 
     if (logs.length === 0) return buyers;
 
-    // 3. 找到真正的“第一枪”
+    // 3. 找到真正的“第一枪” (First Transfer)
     const firstSwapBlock = logs[0].blockNumber;
 
     // 4. 锁定狙击窗口
@@ -191,7 +193,8 @@ async function traceEarlyBuyers(
             const parsed = iface.parseLog(log);
             if (!parsed) continue;
             const to = parsed.args.to.toLowerCase();
-            // 排除基础设施和代币合约自己
+            
+            // 简单的过滤：排除基础设施、代币合约自己、零地址
             if (!INFRA_BLACKLIST.has(to) && to !== address.toLowerCase()) {
                 buyers.add(to);
             }
