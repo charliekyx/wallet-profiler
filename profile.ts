@@ -15,7 +15,7 @@ const GOLDEN_DOGS = [
     { name: "DEGEN", address: "0x4ed4e862860bed51a9570b96d89af5e1b0efefed", fallbackTime: 1704670000 }, // Jan 2024
     { name: "TOSHI", address: "0xac1bd2486aaf3b5c0fc3fd868558b082a531b2b4", fallbackTime: 1691530000 }, // Aug 2023
     { name: "VIRTUAL", address: "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b", fallbackTime: 1727740000 }, // Oct 2024
-    { name: "KEYCAT", address: "0x9a26F5433671751C3276a065f57e5a02D281797d", fallbackTime: 1711060000 }, // Mar 2024
+    { name: "KEYCAT", address: "0x9a26f5433671751c3276a065f57e5a02d281797d", fallbackTime: 1711060000 }, // Mar 2024 (Fixed Checksum)
 ];
 
 const CONFIG = {
@@ -124,7 +124,8 @@ async function getCreationTime(address: string, fallback?: number): Promise<numb
 
         if (pairs && pairs.length > 0) {
             // 找到 Base 链上最早的 pair
-            const basePairs = pairs.filter((p: any) => p.chainId === "base");
+            // 增加 p.pairCreatedAt 检查，防止 API 返回空时间导致 fallback 失效
+            const basePairs = pairs.filter((p: any) => p.chainId === "base" && p.pairCreatedAt);
             if (basePairs.length > 0) {
                 // 按创建时间排序 (如果有这个字段) - DexScreener API 有时返回 pairCreatedAt
                 basePairs.sort((a: any, b: any) => a.pairCreatedAt - b.pairCreatedAt);
