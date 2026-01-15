@@ -11,11 +11,11 @@ const RPC_URL = "http://127.0.0.1:8545";
 // 🎯 Base 链历史级金狗 (人工精选)
 // 这些是已经百倍千倍的币，能抓到它们的早期买家才是真神
 const GOLDEN_DOGS = [
-    { name: "BRETT", address: "0x532f27101965dd16442e59d40670faf5ebb142e4" }, // Base 龙头
-    { name: "DEGEN", address: "0x4ed4e862860bed51a9570b96d89af5e1b0efefed" }, // Farcaster 龙头
-    { name: "TOSHI", address: "0xac1bd2486aaf3b5c0fc3fd868558b082a531b2b4" }, // OG 猫
-    { name: "VIRTUAL", address: "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b" }, // AI 龙头
-    { name: "KEYCAT", address: "0x9a26F5433671751C3276a065f57e5a02D281797d" }, // 早期热门
+    { name: "BRETT", address: "0x532f27101965dd16442e59d40670faf5ebb142e4", fallbackTime: 1708820000 }, // Feb 2024
+    { name: "DEGEN", address: "0x4ed4e862860bed51a9570b96d89af5e1b0efefed", fallbackTime: 1704670000 }, // Jan 2024
+    { name: "TOSHI", address: "0xac1bd2486aaf3b5c0fc3fd868558b082a531b2b4", fallbackTime: 1691530000 }, // Aug 2023
+    { name: "VIRTUAL", address: "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b", fallbackTime: 1727740000 }, // Oct 2024
+    { name: "KEYCAT", address: "0x9a26F5433671751C3276a065f57e5a02D281797d", fallbackTime: 1711060000 }, // Mar 2024
 ];
 
 const CONFIG = {
@@ -27,8 +27,8 @@ const CONFIG = {
     // 对于老币，放宽一点，因为早期流动性可能还没加满
     SNIPE_WINDOW_BLOCKS: 900,
 
-    // 回溯缓冲：向前多搜 10000 个块 (约 5.5 小时) 确保覆盖开盘时刻
-    LOOKBACK_BUFFER_BLOCKS: 10000,
+    // 回溯缓冲：因为使用了精准的 Binary Search，这里只需要很小的缓冲 (约 5 分钟)
+    LOOKBACK_BUFFER_BLOCKS: 150,
 };
 
 // ================= [Core Logic] =================
@@ -80,7 +80,7 @@ async function main() {
 
         try {
             // 1. 获取代币创建时间 (为了计算区块高度)
-            const createdAt = await getCreationTime(target.address);
+            const createdAt = await getCreationTime(target.address, target.fallbackTime);
             if (!createdAt) {
                 console.log(`❌ Failed to get creation time.`);
                 continue;
@@ -114,11 +114,12 @@ async function main() {
 }
 
 // --- Helper: Get Token Age ---
-async function getCreationTime(address: string): Promise<number | null> {
+async function getCreationTime(address: string, fallback?: number): Promise<number | null> {
     try {
         // 利用 DexScreener 查 pair 信息，间接获取创建时间
         const url = `https://api.dexscreener.com/latest/dex/tokens/${address}`;
-        const res = await axios.get(url);
+        // 添加 User-Agent 防止 403 Forbidden
+        const res = await axios.get(url, { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 5000 });
         const pairs = res.data.pairs;
 
         if (pairs && pairs.length > 0) {
@@ -132,6 +133,7 @@ async function getCreationTime(address: string): Promise<number | null> {
         }
         return null;
     } catch (e) {
+        if (fallback) return fallback * 1000; // Fallback to hardcoded time (ms)
         return null;
     }
 }
@@ -145,21 +147,16 @@ async function traceEarlyBuyers(
 ): Promise<Set<string>> {
     const buyers = new Set<string>();
 
-    // 1. 估算区块
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const createdSeconds = Math.floor(createdAtTimestamp / 1000);
-    const ageSeconds = nowSeconds - createdSeconds;
-
-    // Base Block Time ~ 2s
-    const blocksAgo = Math.floor(ageSeconds / 2);
-    const estimatedStartBlock = currentBlock - blocksAgo;
+    // 1. 精准定位区块 (Binary Search)
+    // 使用二分查找在链上找到对应时间戳的准确区块，解决估算偏差问题
+    const targetTimestampSec = Math.floor(createdAtTimestamp / 1000);
+    const startBlock = await getBlockByTimestamp(provider, targetTimestampSec, currentBlock);
 
     // 2. 设定搜索范围
-    const searchStart = Math.max(0, estimatedStartBlock - CONFIG.LOOKBACK_BUFFER_BLOCKS);
-    // 只需要搜开盘后的一小段时间，不用搜到现在
-    // 搜索窗口 = 缓冲 + 狙击窗口 + 一点余量
-    const searchEnd =
-        searchStart + CONFIG.LOOKBACK_BUFFER_BLOCKS + CONFIG.SNIPE_WINDOW_BLOCKS + 2000;
+    // 既然定位精准，只需要往前一点点作为 buffer
+    const searchStart = Math.max(0, startBlock - CONFIG.LOOKBACK_BUFFER_BLOCKS);
+    // 搜索结束 = 开始 + 狙击窗口
+    const searchEnd = startBlock + CONFIG.SNIPE_WINDOW_BLOCKS;
 
     const logs = await provider.getLogs({
         address: address,
@@ -202,6 +199,29 @@ async function traceEarlyBuyers(
     }
 
     return buyers;
+}
+
+// --- Helper: Binary Search Block by Timestamp ---
+async function getBlockByTimestamp(
+    provider: ethers.providers.JsonRpcProvider, 
+    targetTimestamp: number, 
+    maxBlock: number
+): Promise<number> {
+    let min = 0;
+    let max = maxBlock;
+    let closestBlock = max;
+
+    while (min <= max) {
+        const mid = Math.floor((min + max) / 2);
+        const block = await provider.getBlock(mid);
+        if (block.timestamp < targetTimestamp) {
+            min = mid + 1;
+        } else {
+            closestBlock = mid;
+            max = mid - 1;
+        }
+    }
+    return closestBlock;
 }
 
 // --- Module: Reporting ---
