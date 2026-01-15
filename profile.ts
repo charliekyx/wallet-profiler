@@ -13,16 +13,19 @@ const RPC_URL = 'http://127.0.0.1:8545';
 // 筛选配置
 const CONFIG = {
     // 最小流动性阈值 (USD) - 过滤纯垃圾盘
-    MIN_LIQUIDITY_USD: 10_000, 
+    MIN_LIQUIDITY_USD: 5_000, 
     
     // 数据回溯窗口 (天) - 只分析最近 30 天诞生的资产
     MAX_AGE_DAYS: 30, 
     
+    // 扩大搜索范围：防止因为时间戳偏差导致找不到开盘点 (Base ~2s/block)
+    LOOKBACK_BUFFER_BLOCKS: 3000,
+
     // "早期"定义: 开盘后多少个区块内买入? (Base ~2s/Block, 150 blocks ≈ 5 mins)
     SNIPE_WINDOW_BLOCKS: 150, 
     
     // 信号阈值: 至少命中多少个金狗才被标记为 Smart Wallet?
-    MIN_HIT_COUNT: 3, 
+    MIN_HIT_COUNT: 2, 
 };
 
 // Data Providers (Free Tier)
@@ -62,9 +65,10 @@ async function main() {
     console.log(`[System] Node Connection: ${RPC_URL}`);
     
     const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
+    let currentBlock = 0;
     try {
-        await provider.getBlockNumber();
-        console.log(`[System] Connection Established. Latency: OK.`);
+        currentBlock = await provider.getBlockNumber();
+        console.log(`[System] Connection Established. Current Block: ${currentBlock}`);
     } catch (e) {
         console.error(`[Fatal] Node connection failed. Check RPC_URL in .env.`);
         process.exit(1);
@@ -82,7 +86,13 @@ async function main() {
         process.stdout.write(`\n[${i + 1}/${assets.length}] Profiling ${asset.symbol} (${asset.dataSource})... `);
         
         try {
-            const earlyBuyers = await traceEarlyBuyers(provider, asset);
+            // 严格校验地址格式，防止崩溃
+            if (!ethers.utils.isAddress(asset.address)) {
+                console.log(`Skipped (Invalid Address Format)`);
+                continue;
+            }
+
+            const earlyBuyers = await traceEarlyBuyers(provider, asset, currentBlock);
             console.log(`Captured ${earlyBuyers.size} early entires.`);
 
             for (const buyer of earlyBuyers) {
@@ -115,13 +125,15 @@ async function fetchHighPerformanceAssets(): Promise<AssetProfile[]> {
             const ageDays = (now - createdAt) / (1000 * 3600 * 24);
             
             if (ageDays <= CONFIG.MAX_AGE_DAYS && ageDays > 0) {
-                const addr = attr.address.toLowerCase();
-                assetMap.set(addr, {
-                    address: addr,
-                    symbol: attr.name,
-                    createdAtTimestamp: createdAt,
-                    dataSource: 'Gecko'
-                });
+                const addr = attr.address?.toLowerCase();
+                if (addr && addr.length === 42) {
+                    assetMap.set(addr, {
+                        address: addr,
+                        symbol: attr.name,
+                        createdAtTimestamp: createdAt,
+                        dataSource: 'Gecko'
+                    });
+                }
             }
         }
         console.log(`   -> Retrieved ${assetMap.size} candidates.`);
@@ -143,9 +155,9 @@ async function fetchHighPerformanceAssets(): Promise<AssetProfile[]> {
             if (!createdAt) continue;
 
             const ageDays = (now - createdAt) / (1000 * 3600 * 24);
-            const addr = p.pairAddress.toLowerCase();
+            const addr = p.pairAddress?.toLowerCase();
 
-            if (!assetMap.has(addr) && ageDays <= CONFIG.MAX_AGE_DAYS && p.liquidity?.usd >= CONFIG.MIN_LIQUIDITY_USD) {
+            if (addr && addr.length === 42 && !assetMap.has(addr) && ageDays <= CONFIG.MAX_AGE_DAYS && p.liquidity?.usd >= CONFIG.MIN_LIQUIDITY_USD) {
                 assetMap.set(addr, {
                     address: addr,
                     symbol: p.baseToken.symbol,
@@ -165,14 +177,12 @@ async function fetchHighPerformanceAssets(): Promise<AssetProfile[]> {
 }
 
 // --- Module: Chain Tracer ---
-async function traceEarlyBuyers(provider: ethers.providers.JsonRpcProvider, asset: AssetProfile): Promise<Set<string>> {
+async function traceEarlyBuyers(provider: ethers.providers.JsonRpcProvider, asset: AssetProfile, currentBlock: number): Promise<Set<string>> {
     const buyers = new Set<string>();
     
     // Block Estimation (Optimization: Avoid Binary Search for speed)
-    const currentBlock = await provider.getBlockNumber();
-    const currentBlockData = await provider.getBlock(currentBlock);
-    
-    const nowSeconds = currentBlockData.timestamp;
+    // Use system time to save RPC call
+    const nowSeconds = Math.floor(Date.now() / 1000);
     const createdSeconds = Math.floor(asset.createdAtTimestamp / 1000);
     const ageSeconds = nowSeconds - createdSeconds;
     
@@ -180,8 +190,8 @@ async function traceEarlyBuyers(provider: ethers.providers.JsonRpcProvider, asse
     const blocksAgo = Math.floor(ageSeconds / 2);
     const estimatedStartBlock = currentBlock - blocksAgo;
     
-    // Search Range: Estimated Start - 500 blocks -> + 2000 blocks
-    const searchStart = Math.max(0, estimatedStartBlock - 500);
+    // Search Range: Estimated Start - LOOKBACK_BUFFER_BLOCKS -> + 2000 blocks
+    const searchStart = Math.max(0, estimatedStartBlock - CONFIG.LOOKBACK_BUFFER_BLOCKS);
     const searchEnd = Math.min(currentBlock, estimatedStartBlock + 2000);
 
     const logs = await provider.getLogs({
@@ -238,15 +248,15 @@ function exportProfileData(walletHits: Record<string, string[]>) {
         .sort((a, b) => b[1].length - a[1].length);
 
     if (sorted.length === 0) {
-        console.log("No wallets met the MIN_HIT_COUNT threshold. Consider widening the search parameters.");
+        console.log(`No wallets met the MIN_HIT_COUNT (${CONFIG.MIN_HIT_COUNT}) threshold.`);
         
         // Backup: Show 2 hits
         const backup = Object.entries(walletHits)
-            .filter(([_, hits]) => hits.length >= 2)
+            .filter(([_, hits]) => hits.length >= 1)
             .sort((a, b) => b[1].length - a[1].length)
-            .slice(0, 5);
+            .slice(0, 10);
         if (backup.length > 0) {
-             console.log("\n[Info] Displaying wallets with 2 hits (for reference):");
+             console.log("\n[Info] Displaying top active wallets (for reference):");
              backup.forEach(([w, h]) => console.log(`   ${w} -> [${h.join(', ')}]`));
         }
 
