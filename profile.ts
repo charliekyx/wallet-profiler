@@ -34,7 +34,7 @@ const CONFIG = {
     FILTER_MAX_TOTAL_NONCE: 5000, // 历史总交易过高 -> Bot
     FILTER_RECENT_DAYS: 7,        // 检查最近 7 天
     FILTER_MIN_WEEKLY_TXS: 1,     // 7天内至少 1 笔交易 -> 排除死号
-    FILTER_MAX_WEEKLY_TXS: 100,   // 7天内超过 100 笔 -> 排除高频 Bot
+    FILTER_MAX_WEEKLY_TXS: 500,   // 放宽阈值：7天内超过 500 笔才算 Bot (平均每天 ~70 笔)
 };
 
 // ================= [Core Logic] =================
@@ -243,26 +243,55 @@ async function filterWallets(
     const candidates = Object.keys(hits);
     const validHits: Record<string, string[]> = {};
     
-    console.log(`\n[Filter] Auditing ${candidates.length} candidates (Bot/Inactive Check)...`);
+    console.log(`\n[Filter] Auditing ${candidates.length} candidates...`);
     
     const currentBlock = await provider.getBlockNumber();
     const blocksPerDay = 43200; 
     const pastBlock = currentBlock - (blocksPerDay * CONFIG.FILTER_RECENT_DAYS);
 
-    let passed = 0;
+    const stats = {
+        pass: 0,
+        contract: 0,
+        highNonce: 0,
+        lowNonce: 0,
+        inactive: 0,
+        highFreq: 0,
+        rpcError: 0
+    };
 
     for (let i = 0; i < candidates.length; i++) {
         const wallet = candidates[i];
-        // 简单的进度条
-        if (i % 5 === 0) process.stdout.write(`.`);
+        if (i % 10 === 0) process.stdout.write(`.`);
         
-        const isValid = await auditWallet(provider, wallet, pastBlock, currentBlock);
-        if (isValid) {
+        const result = await auditWallet(provider, wallet, pastBlock, currentBlock);
+        
+        if (result.pass) {
             validHits[wallet] = hits[wallet];
-            passed++;
+            stats.pass++;
+        } else {
+            if (result.reason.includes("Contract")) stats.contract++;
+            else if (result.reason.includes("Total Nonce High")) stats.highNonce++;
+            else if (result.reason.includes("Total Nonce Low")) stats.lowNonce++;
+            else if (result.reason.includes("Inactive")) stats.inactive++;
+            else if (result.reason.includes("High Freq")) stats.highFreq++;
+            else if (result.reason.includes("RPC Error")) stats.rpcError++;
         }
     }
-    console.log(`\n[Filter] Passed: ${passed} / ${candidates.length} (Removed ${candidates.length - passed} bots/inactive)`);
+    
+    console.log(`\n\n[Filter Stats]`);
+    console.log(`✅ Passed: ${stats.pass}`);
+    console.log(`❌ Contract: ${stats.contract}`);
+    console.log(`❌ Bot (High Nonce): ${stats.highNonce}`);
+    console.log(`❌ New/Burner (Low Nonce): ${stats.lowNonce}`);
+    console.log(`❌ Inactive (<${CONFIG.FILTER_MIN_WEEKLY_TXS} txs): ${stats.inactive}`);
+    console.log(`❌ High Freq (>${CONFIG.FILTER_MAX_WEEKLY_TXS} txs): ${stats.highFreq}`);
+    console.log(`⚠️ RPC Errors: ${stats.rpcError}`);
+
+    if (stats.rpcError > 0) {
+        console.log(`\n[Warning] High RPC errors detected. Your node might not support historical lookups (${CONFIG.FILTER_RECENT_DAYS} days ago).`);
+        console.log(`Try reducing FILTER_RECENT_DAYS or using an Archive Node.`);
+    }
+
     return validHits;
 }
 
@@ -271,24 +300,31 @@ async function auditWallet(
     address: string, 
     pastBlock: number, 
     currentBlock: number
-): Promise<boolean> {
+): Promise<{ pass: boolean; reason: string }> {
     try {
         const code = await provider.getCode(address);
-        if (code !== '0x') return false; // 是合约
+        if (code !== '0x') return { pass: false, reason: "Contract" };
 
         const nonceNow = await provider.getTransactionCount(address, currentBlock);
-        if (nonceNow > CONFIG.FILTER_MAX_TOTAL_NONCE) return false; // 老牌 Bot
-        if (nonceNow < 2) return false; // 新号/Burner
+        if (nonceNow > CONFIG.FILTER_MAX_TOTAL_NONCE) return { pass: false, reason: "Total Nonce High" };
+        if (nonceNow < 2) return { pass: false, reason: "Total Nonce Low" };
 
-        const noncePast = await provider.getTransactionCount(address, pastBlock);
+        // Try historical lookup
+        let noncePast = 0;
+        try {
+            noncePast = await provider.getTransactionCount(address, pastBlock);
+        } catch (e) {
+            return { pass: false, reason: "RPC Error (History)" };
+        }
+
         const delta = nonceNow - noncePast;
         
-        if (delta < CONFIG.FILTER_MIN_WEEKLY_TXS) return false; // 死号 (0x3f59...)
-        if (delta > CONFIG.FILTER_MAX_WEEKLY_TXS) return false; // 高频 Bot (0x404e...)
+        if (delta < CONFIG.FILTER_MIN_WEEKLY_TXS) return { pass: false, reason: "Inactive" };
+        if (delta > CONFIG.FILTER_MAX_WEEKLY_TXS) return { pass: false, reason: "High Freq" };
 
-        return true;
+        return { pass: true, reason: "OK" };
     } catch (e) {
-        return false;
+        return { pass: false, reason: "RPC Error (General)" };
     }
 }
 
