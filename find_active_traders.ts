@@ -20,6 +20,10 @@ const DEX_ROUTERS = new Set([
     "0xcf77a3ba9a5ca399b7c97c74d54e5b1beb874e43", // Aerodrome Universal
     "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad", // Universal Router
     "0x1111111254fb6c44bac0bed2854e76f90643097d", // 1inch
+    "0xbe6d8f0d05cc4be24d5167a3ef062215be6d18a5", // Aerodrome V3 (Slipstream)
+    "0x743f2f29cdd66242fb27d292ab2cc92f45674635", // Universal Router (Clanker)
+    "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b", // VIRTUAL Token (Proxy/Router)
+    "0xc479b79e53c1065e5e56a6da78e9d634b4ae1e5d", // Virtuals Factory
 ]);
 
 async function main() {

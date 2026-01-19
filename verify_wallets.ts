@@ -5,16 +5,22 @@ import { ethers } from "ethers";
 
 // ================= 配置区域 =================
 const ALCHEMY_API_KEY = "Dy8qDdgHXfCqzP-o1Bw2X"; // 你的 Alchemy Key
-const MIN_WALLET_VALUE_USD = 100; // 资产少于 100U 的直接过滤掉 (大概率是日抛号)
+const MIN_WALLET_VALUE_USD = 1000; // 提高门槛：至少 1000U，过滤掉纯粹的屌丝号
 
 // 只需要检查这几个核心资产
 const TOKENS: Record<string, string> = {
     WETH: "0x4200000000000000000000000000000000000006",
     USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    VIRTUAL: "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b",
+    LUNA: "0x55f1fa9b4244d5276aa3e3aaf1ad56ebbc55422d",
+    AIXBT: "0x4F9Fd6Be4a90f2620860d680c0d4d5Fb53d1A825",
+    SEKOIA: "0x231d61c6762391062df09a6327b729f939023479",
+    CLANKER: "0x1a337774783329D4d3600F6236b2A3b68077D322",
+    LUMIO: "0x0b62372a392b92440360a760670929949704772b",
+    GAME: "0x1c4cca7c5db003824208adda61bd749e55f463a3",
     BRETT: "0x532f27101965dd16442e59d40670faf5ebb142e4",
     DEGEN: "0x4ed4e862860bed51a9570b96d89af5e1b0efefed",
     TOSHI: "0xac1bd2486aaf3b5c0fc3fd868558b082a531b2b4",
-    VIRTUAL: "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b",
     KEYCAT: "0x9a26f5433671751c3276a065f57e5a02d281797d",
     MOG: "0x2Da56AcB9Ea78330f947bD57C54119Debda7AF71"
 };
@@ -65,6 +71,7 @@ async function main() {
             const tokenBals = await alchemy.core.getTokenBalances(wallet, Object.values(TOKENS));
             
             let totalTokenVal = 0;
+            let stableVal = 0; // Track stablecoin value (USDC)
             const holdingDetails: string[] = [];
 
             tokenBals.tokenBalances.forEach(t => {
@@ -82,6 +89,12 @@ async function main() {
                     
                     if (usdVal > 10) { // 只记录大于 $10 的持仓
                         totalTokenVal += usdVal;
+                        
+                        // Check for stables (USDC)
+                        if (addr === TOKENS.USDC.toLowerCase()) {
+                            stableVal += usdVal;
+                        }
+
                         // 找 Token 名字
                         const symbol = Object.keys(TOKENS).find(k => TOKENS[k].toLowerCase() === addr) || "UNKNOWN";
                         holdingDetails.push(`${symbol}: $${usdVal.toFixed(0)}`);
@@ -90,8 +103,12 @@ async function main() {
             });
 
             const totalNetWorth = ethVal + totalTokenVal;
+            const safeAssets = ethVal + stableVal;
 
             if (totalNetWorth > MIN_WALLET_VALUE_USD) {
+                // [Risk Check] Ensure at least 10% is in ETH/Stables (Not full degen)
+                if (safeAssets / totalNetWorth < 0.1) return;
+
                 richList.push({
                     address: wallet,
                     netWorth: totalNetWorth,

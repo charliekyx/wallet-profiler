@@ -1,22 +1,12 @@
 [
   {
-    "name": "FUN",
-    "address": "0x16ee7ecac70d1028e7712751e2ee6ba808a7dd92",
-    "fallbackTime": 1768485188
+    "name": "ROLL",
+    "address": "0xab6363da0c80cef3ae105bd6241e30872355d021",
+    "fallbackTime": 1768575327
   },
   {
-    "name": "MEL",
-    "address": "0x1ba597770e98c4f630ddbdc8b9e1a5cb1b4ca047",
-    "fallbackTime": 1768261399
-  },
-  {
-    "name": "LAUNCH",
-    "address": "0xece5d962d17901ef200da050c7c74ab45c96db07",
-    "fallbackTime": 1768354165
-  },
-  {
-    "name": "REGGIE",
-    "address": "0xa1ed16bd6e37f0bf201f674e41603815418e8453",
-    "fallbackTime": 1768340039
+    "name": "THINK",
+    "address": "0xe6ee5bc3f420d1f9eca60656ef6b307c04e42b07",
+    "fallbackTime": 1768623489
   }
 ]

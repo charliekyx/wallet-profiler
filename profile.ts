@@ -83,8 +83,14 @@ async function main() {
     // 尝试读取 trending_dogs.json
     let targets: any[] = [];
     try {
-        if (fs.existsSync("trending_dogs.json")) {
-            const data = fs.readFileSync("trending_dogs.json", "utf-8");
+        // [新增] 优先读取手动配置文件 (trending_dogs_manual.json)，防止被 pipeline 脚本的自动抓取覆盖
+        const manualFile = "trending_dogs_manual.json";
+        const autoFile = "trending_dogs.json";
+        const targetFile = fs.existsSync(manualFile) ? manualFile : autoFile;
+
+        if (fs.existsSync(targetFile)) {
+            if (targetFile === manualFile) console.log(`[System] 🛡️ Using manual config: ${manualFile}`);
+            const data = fs.readFileSync(targetFile, "utf-8");
             targets = JSON.parse(data);
             if (targets.length === 0) {
                 console.log(`[System] ⚠️ trending_dogs.json is empty. No fresh dogs found.`);
@@ -196,18 +202,30 @@ async function traceEarlyBuyers(
 
     // 3. 找到真正的“第一枪” (First Transfer)
     const firstSwapBlock = logs[0].blockNumber;
+    
+    // [优化] 跳过前 3 个区块 (避开 Bundle Bot 和 狙击手)
+    // 我们想找的是“聪明钱”或“早期跟随者”，而不是那种拼 Gas 的科学家
+    const safeEntryBlock = firstSwapBlock + 3; 
 
     // 4. 锁定狙击窗口
     const snipeWindowEnd = firstSwapBlock + CONFIG.SNIPE_WINDOW_BLOCKS;
-    const earlyLogs = logs.filter((l) => l.blockNumber <= snipeWindowEnd);
+    
+    // [优化] 过滤掉太早的日志
+    const earlyLogs = logs.filter((l) => l.blockNumber >= safeEntryBlock && l.blockNumber <= snipeWindowEnd);
 
     const INFRA_BLACKLIST = new Set([
         "0x2948acbbc8795267e62a1220683a48e718b52585", // BaseSwap
         "0x8c1a3cf8f83074169fe5d7ad50b978e1cd6b37c7", // AlienBase
-        "0x2626664c2603336e57b271c5c0b26f421741e481", // UniV3
+        "0x2626664c2603336e57b271c5c0b26f421741e481", // UniV3 Router
+        "0x3d4e44eb1374240ce5f1b871ab261cd16335b76a", // UniV3 Quoter
         "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad58", // UniV2
         "0x1111111254fb6c44bac0bed2854e76f90643097d", // 1inch
-        "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad", // Universal Router
+        "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad", // Universal Router 1
+        "0x743f2f29cdd66242fb27d292ab2cc92f45674635", // Universal Router 2 (Clanker)
+        "0xcf77a3ba9a5ca399b7c97c74d54e5b1beb874e43", // Aerodrome V2
+        "0xbe6d8f0d05cc4be24d5167a3ef062215be6d18a5", // Aerodrome V3 (Slipstream)
+        "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b", // Virtuals Token (Hop)
+        "0xc479b79e53c1065e5e56a6da78e9d634b4ae1e5d", // Virtuals Factory
         "0x0000000000000000000000000000000000000000", // Null
     ]);
 

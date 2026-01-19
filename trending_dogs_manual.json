@@ -1,0 +1,22 @@
+[
+  {
+    "name": "LUNA (Virtuals)",
+    "address": "0x55cd6469f597452b5a7536e2cd98fde4c1247ee4",
+    "fallbackTime": 1700000000
+  },
+  {
+    "name": "AIXBT",
+    "address": "0x4F9Fd6Be4a90f2620860d680c0d4d5Fb53d1A825",
+    "fallbackTime": 1700000000
+  },
+  {
+    "name": "SEKOIA",
+    "address": "0x1185cb5122edad199bdbc0cbd7a0457e448f23c7",
+    "fallbackTime": 1700000000
+  },
+  {
+    "name": "GAME",
+    "address": "0x1c4cca7c5db003824208adda61bd749e55f463a3",
+    "fallbackTime": 1700000000
+  }
+]
