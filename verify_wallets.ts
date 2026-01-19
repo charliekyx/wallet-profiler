@@ -107,7 +107,8 @@ async function main() {
 
             if (totalNetWorth > MIN_WALLET_VALUE_USD) {
                 // [Risk Check] Ensure at least 10% is in ETH/Stables (Not full degen)
-                if (safeAssets / totalNetWorth < 0.1) return;
+                // [已删除] 狙击手通常满仓金狗，不要检查 ETH/USDC 占比！
+                // if (safeAssets / totalNetWorth < 0.1) return;
 
                 richList.push({
                     address: wallet,
