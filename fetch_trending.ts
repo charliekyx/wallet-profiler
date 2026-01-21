@@ -11,10 +11,10 @@ const CONFIG = {
     ANCHOR_TOKEN: "0x4200000000000000000000000000000000000006", 
 
     // 过滤标准
-    MAX_AGE_HOURS: 72,      // 只看最近 3 天(72小时)内上线的币
-    MIN_LIQUIDITY_USD: 5000, // 池子流动性至少 $5k
+    MAX_AGE_HOURS: 336,      // 扩大时间范围到 14 天，寻找更稳健的趋势
+    MIN_LIQUIDITY_USD: 20000, // 提高门槛，只看真正跑出来的金狗
     MIN_VOLUME_24H: 10000,   // 24小时成交量至少 $10k (活跃!)
-    MIN_FDV: 10000,          // 市值至少 $10k
+    MIN_FDV: 50000,          // 市值至少 $50k
 };
 
 async function main() {
@@ -61,7 +61,8 @@ async function main() {
             // id 格式通常是 "base_0x..."
             const baseTokenId = pool.relationships?.base_token?.data?.id;
             if (!baseTokenId) continue;
-            const tokenAddress = baseTokenId.split("_")[1];
+            // [修正] 兼容 "base_0x..." 和直接 "0x..." 的格式，并去除潜在空格
+            const tokenAddress = (baseTokenId.includes("_") ? baseTokenId.split("_")[1] : baseTokenId).trim();
             const name = attr.name.split(" / ")[0];
 
             // 排除稳定币和 WETH

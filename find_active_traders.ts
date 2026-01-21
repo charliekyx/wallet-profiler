@@ -110,13 +110,13 @@ async function main() {
     console.log(`\n\n================ 🎯 TARGET LIST (COPY THESE!) ================`);
     if (activeHunters.length === 0) {
         console.log("⚠️ No active hunters found in last 7 days.");
-    } else {
-        activeHunters.forEach(h => {
-            console.log(`🟢 [ACTIVE] ${h.address} | Last: ${h.action}`);
-        });
-        console.log(`\n👉 Export for Bot:`);
-        console.log(activeHunters.map(h => h.address).join(","));
     }
+    activeHunters.forEach(h => {
+        console.log(`🟢 [ACTIVE] ${h.address} | Last: ${h.action}`);
+    });
+
+    console.log(`\n👉 Export for Bot (${candidates.length} wallets):`);
+    console.log(candidates.join(","));
 
     console.log(`\n================ 💤 SLEEPING WATCHLIST (SET ALERTS) ================`);
     console.log(`(Do NOT copy trade yet, wait for them to wake up)`);

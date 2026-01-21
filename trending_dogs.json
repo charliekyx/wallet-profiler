@@ -5,8 +5,38 @@
     "fallbackTime": 1768575327
   },
   {
-    "name": "THINK",
-    "address": "0xe6ee5bc3f420d1f9eca60656ef6b307c04e42b07",
-    "fallbackTime": 1768623489
+    "name": "ELSA",
+    "address": "0x29cc30f9d113b356ce408667aa6433589cecbdca",
+    "fallbackTime": 1768895794
+  },
+  {
+    "name": "ROLL",
+    "address": "0xab6363da0c80cef3ae105bd6241e30872355d021",
+    "fallbackTime": 1768487861
+  },
+  {
+    "name": "US OIL RESERVE",
+    "address": "0x0f62b96512b8e55c9a0caa00c733b3bf7c429cff",
+    "fallbackTime": 1768679769
+  },
+  {
+    "name": "FUN",
+    "address": "0x16ee7ecac70d1028e7712751e2ee6ba808a7dd92",
+    "fallbackTime": 1768485188
+  },
+  {
+    "name": "BFS",
+    "address": "0xc89766fa34b7170ad3582c2ffaf9773a74509bb3",
+    "fallbackTime": 1768873877
+  },
+  {
+    "name": "KNT",
+    "address": "0x80b84b63c88d054d300d51e801c2a65e20d44b07",
+    "fallbackTime": 1768952985
+  },
+  {
+    "name": "ICCM",
+    "address": "0x5855da52aeb60a73088967a2d90c4891984a0465",
+    "fallbackTime": 1768955009
   }
 ]

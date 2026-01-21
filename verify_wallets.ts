@@ -75,6 +75,11 @@ async function main() {
             let totalTokenVal = 0;
             const holdingDetails: string[] = [];
 
+            // [新增] 将 ETH 余额加入显示详情
+            if (ethVal > 10) {
+                holdingDetails.push(`ETH: $${ethVal.toFixed(0)}`);
+            }
+
             tokenBals.tokenBalances.forEach(t => {
                 const addr = t.contractAddress.toLowerCase();
                 // 只要价格存在（现在有保底，一定存在）
