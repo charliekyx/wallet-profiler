@@ -20,10 +20,26 @@ const DEX_ROUTERS = new Set([
     "0xcf77a3ba9a5ca399b7c97c74d54e5b1beb874e43", // Aerodrome Universal
     "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad", // Universal Router
     "0x1111111254fb6c44bac0bed2854e76f90643097d", // 1inch
-    "0xbe6d8f0d05cc4be24d5167a3ef062215be6d18a5", // Aerodrome V3 (Slipstream)
-    "0x743f2f29cdd66242fb27d292ab2cc92f45674635", // Universal Router (Clanker)
-    "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b", // VIRTUAL Token (Proxy/Router)
-    "0xc479b79e53c1065e5e56a6da78e9d634b4ae1e5d", // Virtuals Factory
+    "0xbe6d8f0d05cc4be24d5167a3ef062215be6d18a5", // Aerodrome Slipstream (V3)
+
+    // [新增] 对应 Rust 策略中的其他 DEX
+    "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86", // BaseSwap V2
+    "0x8c1A3cF8f83074169FE5D7aD50B978e1cD6b37c7", // AlienBase V2
+    "0x6BDED42c6DA8FBf0d2bA55B2fa120C5e0c8D7891", // SushiSwap V2
+    "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86", // PancakeSwap V3 Router
+    "0x04C9f17463a2E8eD375772F412171b963d984531", // SwapBased V2
+    "0x4cf76043B3f97ba06917cBd90F9e3A2AFcdb1B78", // RocketSwap V2
+
+    // [Rust Sync] 同步 Rust constants.rs 中的地址
+    "0x2948acbbc8795267e62a1220683a48e718b52585", // BaseSwap (Rust)
+    "0x1b81D678ffb9C0263b24A97847620C99d213eB14", // PancakeSwap V3 (Rust)
+    "0xaaa3b1F1bd7BCc97fD1917c18ade665C5D31F066", // SwapBased (Rust)
+    "0x4cf76043B3f97ba06917cBd90F9e3A2AFcd1aCd0", // RocketSwap (Rust)
+    "0x743f2f29cdd66242fb27d292ab2cc92f45674635", // Universal Router (Rust)
+    "0x8d0d118070b728e104294471fbe93c2e3affd694", // Odos Router
+    "0x663dc15d3c1ac63ff12e45ab68fea3f0a883c251", // deBridge
+    "0xc479b79e53c1065e5e56a6da78e9d634b4ae1e5d", // Virtuals Protocol (Factory/Router)
+    "0x498581fF718922c3f8e6A244956aF099B2652b2b", // Uniswap V4 Pool Manager
 ]);
 
 async function main() {
@@ -110,13 +126,13 @@ async function main() {
     console.log(`\n\n================ 🎯 TARGET LIST (COPY THESE!) ================`);
     if (activeHunters.length === 0) {
         console.log("⚠️ No active hunters found in last 7 days.");
+    } else {
+        activeHunters.forEach(h => {
+            console.log(`🟢 [ACTIVE] ${h.address} | Last: ${h.action}`);
+        });
+        console.log(`\n👉 Export for Bot:`);
+        console.log(activeHunters.map(h => h.address).join(","));
     }
-    activeHunters.forEach(h => {
-        console.log(`🟢 [ACTIVE] ${h.address} | Last: ${h.action}`);
-    });
-
-    console.log(`\n👉 Export for Bot (${candidates.length} wallets):`);
-    console.log(candidates.join(","));
 
     console.log(`\n================ 💤 SLEEPING WATCHLIST (SET ALERTS) ================`);
     console.log(`(Do NOT copy trade yet, wait for them to wake up)`);

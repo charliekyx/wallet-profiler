@@ -20,7 +20,7 @@ const CONFIG = {
     LOOKBACK_BUFFER_BLOCKS: 3000, 
 
     // 4. 清洗逻辑 (放宽！)
-    FILTER_MAX_TOTAL_NONCE: 15000, 
+    FILTER_MAX_TOTAL_NONCE: 5000, 
     
     // [关键修改]：检查过去 7 天的活跃度，而不是 3 天
     FILTER_RECENT_DAYS: 7,        
@@ -28,33 +28,48 @@ const CONFIG = {
     // [关键修改]：暂时允许不活跃 (0)，因为我们要找的是持有者，不一定是高频交易员
     FILTER_MIN_WEEKLY_TXS: 0,     
     
-    FILTER_MAX_WEEKLY_TXS: 300,    
-
-    // [新增] PnL 过滤门槛：至少 2 倍收益 (2.0)
-    MIN_PNL_MULTIPLIER: 2.0,
+    FILTER_MAX_WEEKLY_TXS: 200,    
     
-    // [优化] 增加分片大小。10 太小了，会导致请求过于频繁。
-    // 200 是一个平衡点，既不容易触发 10k 日志限制，又能减少请求次数。
-    RPC_CHUNK_SIZE: 200,           
-
-    // [新增] 已知的正规 DEX 路由地址
-    KNOWN_ROUTERS: new Set([
-        "0x2626664c2603336e57b271c5c0b26f421741e481", // UniV3 Router
-        "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad58", // UniV2 Router
-        "0xcf77a3ba9a5ca399b7c97c74d54e5b1beb874e43", // Aerodrome V2
-        "0xbe6d8f0d05cc4be24d5167a3ef062215be6d18a5", // Aerodrome V3
-        "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad", // Universal Router
-        "0x1111111254fb6c44bac0bed2854e76f90643097d", // 1inch
-    ]),
+    // [重要修复]：对于热门代币（Golden Dogs），1000 区块内的交易量极易超过 Alchemy 的 10k 条日志限制。
+    // 导致 RPC 返回 400 错误。将分片大小降低到 50 是最稳妥的选择。
+    RPC_CHUNK_SIZE: 10,           
 };
 
 // ================= [Core Logic] =================
+
+// Base 常见 DEX 路由地址 (用于识别 Legit Sell)
+const DEX_ROUTERS = new Set([
+    "0x2626664c2603336e57b271c5c0b26f421741e481", // Uniswap V3
+    "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad58", // Uniswap V2
+    "0xcf77a3ba9a5ca399b7c97c74d54e5b1beb874e43", // Aerodrome Universal
+    "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad", // Universal Router
+    "0x1111111254fb6c44bac0bed2854e76f90643097d", // 1inch
+    "0xbe6d8f0d05cc4be24d5167a3ef062215be6d18a5", // Aerodrome Slipstream (V3)
+
+    // [新增] 对应 Rust 策略中的其他 DEX
+    "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86", // BaseSwap V2
+    "0x8c1A3cF8f83074169FE5D7aD50B978e1cD6b37c7", // AlienBase V2
+    "0x6BDED42c6DA8FBf0d2bA55B2fa120C5e0c8D7891", // SushiSwap V2
+    "0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86", // PancakeSwap V3 Router
+    "0x04C9f17463a2E8eD375772F412171b963d984531", // SwapBased V2
+    "0x4cf76043B3f97ba06917cBd90F9e3A2AFcdb1B78", // RocketSwap V2
+
+    // [Rust Sync] 同步 Rust constants.rs 中的地址 (防止误杀)
+    "0x2948acbbc8795267e62a1220683a48e718b52585", // BaseSwap (Rust)
+    "0x1b81D678ffb9C0263b24A97847620C99d213eB14", // PancakeSwap V3 (Rust)
+    "0xaaa3b1F1bd7BCc97fD1917c18ade665C5D31F066", // SwapBased (Rust)
+    "0x4cf76043B3f97ba06917cBd90F9e3A2AFcd1aCd0", // RocketSwap (Rust)
+    "0x743f2f29cdd66242fb27d292ab2cc92f45674635", // Universal Router (Rust)
+    "0x8d0d118070b728e104294471fbe93c2e3affd694", // Odos Router
+    "0x663dc15d3c1ac63ff12e45ab68fea3f0a883c251", // deBridge
+    "0xc479b79e53c1065e5e56a6da78e9d634b4ae1e5d", // Virtuals Protocol (Factory/Router)
+    "0x498581fF718922c3f8e6A244956aF099B2652b2b", // Uniswap V4 Pool Manager
+]);
 
 // Standard Transfer Event Topic (ERC20)
 let TRANSFER_TOPIC = "";
 const LOG_ABI = [
     "event Transfer(address indexed from, address indexed to, uint256 value)",
-    "function balanceOf(address) view returns (uint256)",
 ];
 
 async function main() {
@@ -80,6 +95,9 @@ async function main() {
     console.log(`[System] Node Connection: ${RPC_URL}`);
     console.log(`[System] Targets: (Loading from file or defaults...)`);
 
+    // [新增] 定义全局黑名单，用于记录所有“不干净”的地址
+    const globalBlacklist = new Set<string>();
+
     // 使用 StaticJsonRpcProvider 替代 JsonRpcProvider。
     // 这可以避免 ethers 频繁调用 eth_chainId 导致的 "could not detect network" 错误，特别是在使用 Alchemy 等稳定节点时。
     const provider = new ethers.providers.StaticJsonRpcProvider(RPC_URL);
@@ -97,14 +115,8 @@ async function main() {
     // 尝试读取 trending_dogs.json
     let targets: any[] = [];
     try {
-        // [新增] 优先读取手动配置文件 (trending_dogs_manual.json)，防止被 pipeline 脚本的自动抓取覆盖
-        const manualFile = "trending_dogs_manual.json";
-        const autoFile = "trending_dogs.json";
-        const targetFile = fs.existsSync(manualFile) ? manualFile : autoFile;
-
-        if (fs.existsSync(targetFile)) {
-            if (targetFile === manualFile) console.log(`[System] 🛡️ Using manual config: ${manualFile}`);
-            const data = fs.readFileSync(targetFile, "utf-8");
+        if (fs.existsSync("trending_dogs.json")) {
+            const data = fs.readFileSync("trending_dogs.json", "utf-8");
             targets = JSON.parse(data);
             if (targets.length === 0) {
                 console.log(`[System] ⚠️ trending_dogs.json is empty. No fresh dogs found.`);
@@ -124,53 +136,48 @@ async function main() {
 
     for (let i = 0; i < targets.length; i++) {
         const target = targets[i];
-        // [新增] 基础校验，防止无效地址进入查询逻辑
-        if (!target.address || !target.address.startsWith("0x")) {
-            console.log(`\n[${i + 1}/${targets.length}] ⚠️ Skipping ${target.name}: Invalid address.`);
-            continue;
-        }
-
         process.stdout.write(`\n[${i + 1}/${targets.length}] 🕵️  Analyzing ${target.name}... `);
 
         try {
-            // 1. 获取代币元数据 (包含创建时间、当前价格、涨幅)
-            const meta = await getTokenMetadata(target.address, target.fallbackTime);
-            if (!meta) {
-                console.log(`❌ Failed to get token metadata.`);
+            // 1. 获取代币创建时间 (为了计算区块高度)
+            const createdAt = await getCreationTime(target.address, target.fallbackTime);
+            if (!createdAt) {
+                console.log(`❌ Failed to get creation time.`);
                 continue;
             }
-
-            // 估算代币从开盘到现在的涨幅 (基于 24h 价格变动估算，或直接看当前价格)
-            // 注意：新币通常涨幅巨大，这里我们关注它是否达到了 2x 门槛
-            const tokenGrowth = meta.currentPrice > 0 ? meta.currentPrice / meta.initialPriceEstimate : 0;
-            console.log(`📈 Current Growth: ${tokenGrowth.toFixed(2)}x`);
 
             // 2. 扫描早期买家
             const earlyBuyers = await traceEarlyBuyers(
                 provider,
                 target.address,
-                meta.createdAt,
+                createdAt,
                 currentBlock
             );
 
             if (earlyBuyers.size > 0) {
-                // [核心修改] 增加 PnL 过滤：只保留在翻倍币中“淘到金”的钱包
-                const profitableBuyers = await filterByPnL(provider, target.address, earlyBuyers, tokenGrowth);
+                // PnL 过滤 (暂略，直接处理所有买家)
+                const profitableBuyers = Array.from(earlyBuyers);
                 
-                // [新增] 销赃验证：过滤掉通过私有合约卖出的内鬼
                 const verifiedBuyers: string[] = [];
                 process.stdout.write(`🕵️  Verifying legit sells... `);
                 
-                // 采用小批量并行处理，兼顾速度与稳定性
+                // [修改开始] 引入黑名单记录逻辑
                 for (let j = 0; j < profitableBuyers.length; j += 10) {
                     const chunk = profitableBuyers.slice(j, j + 10);
                     await Promise.all(chunk.map(async (buyer) => {
                         const status = await checkLegitSell(provider, buyer, target.address, currentBlock);
-                        if (status !== 'SUSPICIOUS') {
+                        
+                        if (status === 'SUSPICIOUS') {
+                            // 🚨 发现内鬼/Bot行为！加入全局黑名单
+                            globalBlacklist.add(buyer);
+                        } else if (status === 'YES') {
+                            // 只有明确通过正规路由卖出的，暂时加入白名单
                             verifiedBuyers.push(buyer);
                         }
+                        // status === 'NO_SELL' (钻石手) 既不加白也不拉黑
                     }));
                 }
+                // [修改结束]
 
                 console.log(`✅ Captured ${verifiedBuyers.length}/${earlyBuyers.size} legit snipers.`);
                 
@@ -186,72 +193,93 @@ async function main() {
         }
     }
 
+    // [新增] 💀 最终审判：执行一票否决
+    if (globalBlacklist.size > 0) {
+        console.log(`\n☠️ Executing Global Ban on ${globalBlacklist.size} suspicious wallets...`);
+        for (const badActor of globalBlacklist) {
+            if (walletHits[badActor]) {
+                // 如果这个人在名单里，删掉他！
+                delete walletHits[badActor]; 
+            }
+        }
+    }
+
     // 3. 自动清洗 (去除 Bot 和 死号)
     const cleanedHits = await filterWallets(provider, walletHits);
     exportProfileData(cleanedHits);
 }
 
-// --- Helper: Get Token Age ---
-async function getTokenMetadata(address: string, fallback?: number) {
+// --- Helper: Check Legit Sell (One-Strike Veto) ---
+async function checkLegitSell(
+    provider: ethers.providers.JsonRpcProvider,
+    wallet: string,
+    tokenAddress: string,
+    currentBlock: number
+): Promise<'YES' | 'NO_SELL' | 'SUSPICIOUS'> {
     try {
+        // 1. Get transfers FROM wallet
+        const topic = ethers.utils.id("Transfer(address,address,uint256)");
+        // topic1 is 'from'
+        const logs = await provider.getLogs({
+            address: tokenAddress,
+            topics: [topic, ethers.utils.hexZeroPad(wallet, 32)],
+            fromBlock: 0, // Scan all history for this token
+            toBlock: 'latest'
+        });
+
+        if (logs.length === 0) return 'NO_SELL';
+
+        // Check the sells
+        for (const log of logs) {
+            const tx = await provider.getTransaction(log.transactionHash);
+            if (!tx || !tx.to) continue; 
+            
+            const to = tx.to.toLowerCase();
+            
+            // Known Routers -> Legit
+            if (DEX_ROUTERS.has(to)) return 'YES';
+            
+            // If it's a contract and NOT a router -> Suspicious
+            const code = await provider.getCode(to);
+            if (code !== '0x') {
+                // Exception: Token contract itself (some tokens have transfer functions)
+                if (to === tokenAddress.toLowerCase()) return 'YES';
+                return 'SUSPICIOUS';
+            }
+        }
+        
+        return 'YES'; // Only transfers to EOAs found, assume legit
+    } catch (e) {
+        return 'NO_SELL';
+    }
+}
+
+// --- Helper: Get Token Age ---
+async function getCreationTime(address: string, fallback?: number): Promise<number | null> {
+    try {
+        // 利用 DexScreener 查 pair 信息，间接获取创建时间
         const url = `https://api.dexscreener.com/latest/dex/tokens/${address}`;
+        // 添加 User-Agent 防止 403 Forbidden
         const res = await axios.get(url, { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 5000 });
         const pairs = res.data.pairs;
 
         if (pairs && pairs.length > 0) {
+            // 找到 Base 链上最早的 pair
+            // 增加 p.pairCreatedAt 检查，防止 API 返回空时间导致 fallback 失效
             const basePairs = pairs.filter((p: any) => p.chainId === "base" && p.pairCreatedAt);
             if (basePairs.length > 0) {
+                // 按创建时间排序 (如果有这个字段) - DexScreener API 有时返回 pairCreatedAt
                 basePairs.sort((a: any, b: any) => a.pairCreatedAt - b.pairCreatedAt);
-                const p = basePairs[0];
-                const currentPrice = parseFloat(p.priceUsd || "0");
-                const h24Change = parseFloat(p.priceChange?.h24 || "0");
-                // 粗略估算初始价格：当前价 / (1 + 涨幅%)
-                const initialPriceEstimate = currentPrice / (1 + (h24Change / 100));
-                
-                return {
-                    createdAt: p.pairCreatedAt,
-                    currentPrice,
-                    initialPriceEstimate,
-                    priceChange24h: h24Change
-                };
+                return basePairs[0].pairCreatedAt;
             }
         }
-        return fallback ? { createdAt: fallback * 1000, currentPrice: 0, initialPriceEstimate: 0.00001, priceChange24h: 0 } : null;
+        // API 请求成功但没找到数据，也使用 Fallback
+        if (fallback) return fallback * 1000;
+        return null;
     } catch (e) {
-        return fallback ? { createdAt: fallback * 1000, currentPrice: 0, initialPriceEstimate: 0.00001, priceChange24h: 0 } : null;
+        if (fallback) return fallback * 1000; // Fallback to hardcoded time (ms)
+        return null;
     }
-}
-
-async function filterByPnL(
-    provider: ethers.providers.StaticJsonRpcProvider,
-    tokenAddress: string,
-    buyers: Set<string>,
-    tokenGrowth: number
-): Promise<string[]> {
-    // 如果代币本身涨幅都没到门槛，则该币种下没有符合条件的“常胜将军”
-    if (tokenGrowth < CONFIG.MIN_PNL_MULTIPLIER) {
-        return [];
-    }
-
-    const winners: string[] = [];
-    const buyerArray = Array.from(buyers);
-    const tokenContract = new ethers.Contract(tokenAddress, LOG_ABI, provider);
-
-    // 批量检查余额 (使用配置的分片大小)
-    for (let i = 0; i < buyerArray.length; i += CONFIG.RPC_CHUNK_SIZE) {
-        const chunk = buyerArray.slice(i, i + CONFIG.RPC_CHUNK_SIZE);
-        await Promise.all(chunk.map(async (wallet) => {
-            try {
-                const balance = await tokenContract.balanceOf(wallet);
-                // 只要买入过且代币翻倍了，我们就认为该钱包具备捕捉金狗的能力
-                if (balance.gt(0) || balance.eq(0)) {
-                    winners.push(wallet);
-                }
-            } catch (e) {}
-        }));
-    }
-
-    return winners;
 }
 
 // --- Module: Time Travel & Trace ---
@@ -271,8 +299,8 @@ async function traceEarlyBuyers(
     // 2. 设定搜索范围
     // 既然定位精准，只需要往前一点点作为 buffer
     const searchStart = Math.max(0, startBlock - CONFIG.LOOKBACK_BUFFER_BLOCKS);
-    // 搜索结束 = 开始 + 狙击窗口，但不能超过当前最新区块，否则 RPC 会报 400 错误
-    const searchEnd = Math.min(currentBlock, startBlock + CONFIG.SNIPE_WINDOW_BLOCKS);
+    // 搜索结束 = 开始 + 狙击窗口
+    const searchEnd = startBlock + CONFIG.SNIPE_WINDOW_BLOCKS;
 
     const logs = await getLogsInChunks(provider, searchStart, searchEnd, address, TRANSFER_TOPIC);
 
@@ -280,30 +308,18 @@ async function traceEarlyBuyers(
 
     // 3. 找到真正的“第一枪” (First Transfer)
     const firstSwapBlock = logs[0].blockNumber;
-    
-    // [优化] 跳过前 3 个区块 (避开 Bundle Bot 和 狙击手)
-    // 我们想找的是“聪明钱”或“早期跟随者”，而不是那种拼 Gas 的科学家
-    const safeEntryBlock = firstSwapBlock + 3; 
 
     // 4. 锁定狙击窗口
     const snipeWindowEnd = firstSwapBlock + CONFIG.SNIPE_WINDOW_BLOCKS;
-    
-    // [优化] 过滤掉太早的日志
-    const earlyLogs = logs.filter((l) => l.blockNumber >= safeEntryBlock && l.blockNumber <= snipeWindowEnd);
+    const earlyLogs = logs.filter((l) => l.blockNumber <= snipeWindowEnd);
 
     const INFRA_BLACKLIST = new Set([
         "0x2948acbbc8795267e62a1220683a48e718b52585", // BaseSwap
         "0x8c1a3cf8f83074169fe5d7ad50b978e1cd6b37c7", // AlienBase
-        "0x2626664c2603336e57b271c5c0b26f421741e481", // UniV3 Router
-        "0x3d4e44eb1374240ce5f1b871ab261cd16335b76a", // UniV3 Quoter
+        "0x2626664c2603336e57b271c5c0b26f421741e481", // UniV3
         "0x4752ba5dbc23f44d87826276bf6fd6b1c372ad58", // UniV2
         "0x1111111254fb6c44bac0bed2854e76f90643097d", // 1inch
-        "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad", // Universal Router 1
-        "0x743f2f29cdd66242fb27d292ab2cc92f45674635", // Universal Router 2 (Clanker)
-        "0xcf77a3ba9a5ca399b7c97c74d54e5b1beb874e43", // Aerodrome V2
-        "0xbe6d8f0d05cc4be24d5167a3ef062215be6d18a5", // Aerodrome V3 (Slipstream)
-        "0x0b3e328455c4059eeb9e3f84b5543f74e24e7e1b", // Virtuals Token (Hop)
-        "0xc479b79e53c1065e5e56a6da78e9d634b4ae1e5d", // Virtuals Factory
+        "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad", // Universal Router
         "0x0000000000000000000000000000000000000000", // Null
     ]);
 
@@ -360,51 +376,39 @@ async function getLogsInChunks(
     address: string,
     topic: string
 ): Promise<ethers.providers.Log[]> {
-    if (fromBlock > toBlock) return [];
+    const allLogs: ethers.providers.Log[] = [];
+    let start = fromBlock;
+    
+    // Alchemy Free Tier limit is strict (10 blocks). 
+    // If using other RPCs, you can increase CONFIG.RPC_CHUNK_SIZE to 2000.
+    const chunkSize = CONFIG.RPC_CHUNK_SIZE; 
 
-    let retries = 3;
-    while (retries > 0) {
-        try {
-            const logs = await provider.getLogs({
-                address: address,
-                topics: [topic],
-                fromBlock: fromBlock,
-                toBlock: toBlock,
-            });
-            return logs;
-        } catch (e: any) {
-            const errorMsg = e.message || "";
-            
-            // [核心逻辑] 如果遇到 400 错误（通常是日志量超限）或范围限制
-            if (errorMsg.includes("400") || errorMsg.includes("limit") || errorMsg.includes("size")) {
-                // 如果已经缩小到单块还是报错，说明该块日志量巨大（可能是攻击或异常代币），直接跳过
-                if (fromBlock === toBlock) {
-                    console.log(`   ⚠️ Skipping block ${fromBlock}: Too many logs for a single block.`);
-                    return [];
-                }
-
-                // 二分法：将当前范围切半，递归查询
-                const mid = Math.floor((fromBlock + toBlock) / 2);
-                const left = await getLogsInChunks(provider, fromBlock, mid, address, topic);
-                const right = await getLogsInChunks(provider, mid + 1, toBlock, address, topic);
-                return [...left, ...right];
-            }
-
-            // 如果是 429 (频率限制)，等待后重试
-            if (errorMsg.includes("429")) {
-                await new Promise(resolve => setTimeout(resolve, 2000));
+    while (start <= toBlock) {
+        const end = Math.min(start + chunkSize - 1, toBlock);
+        let retries = 3;
+        while (retries > 0) {
+            try {
+                const logs = await provider.getLogs({
+                    address: address,
+                    topics: [topic],
+                    fromBlock: start,
+                    toBlock: end,
+                });
+                allLogs.push(...logs);
+                break; // 成功则跳出重试循环
+            } catch (e) {
                 retries--;
-                continue;
+                if (retries === 0) {
+                    console.log(`   ⚠️ Chunk failed [${start}-${end}] after 3 attempts: ${(e as any).message.slice(0, 50)}...`);
+                } else {
+                    // 遇到错误（如频率限制）时等待 1 秒后重试
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
             }
-
-            // 其他未知错误，重试
-            retries--;
-            if (retries > 0) await new Promise(resolve => setTimeout(resolve, 1000));
         }
+        start += chunkSize;
     }
-
-    console.log(`   ⚠️ Failed to fetch logs for range [${fromBlock}-${toBlock}]`);
-    return [];
+    return allLogs;
 }
 
 // --- Module: Auto Filter (Integrated) ---
@@ -465,45 +469,6 @@ async function filterWallets(
     }
 
     return validHits;
-}
-
-/**
- * [新增] 检查买家是否有“正规”的卖出记录
- * 逻辑：如果一个钱包卖出了代币，但接收方不是任何已知的 DEX 路由，则判定为 SUSPICIOUS
- */
-async function checkLegitSell(
-    provider: ethers.providers.StaticJsonRpcProvider,
-    wallet: string,
-    tokenAddress: string,
-    currentBlock: number
-): Promise<'YES' | 'NO_SELL' | 'SUSPICIOUS'> {
-    const topic = ethers.utils.id("Transfer(address,address,uint256)");
-    const walletPad = ethers.utils.hexZeroPad(wallet, 32);
-    const iface = new ethers.utils.Interface(LOG_ABI);
-
-    try {
-        // 扫描过去 10000 个区块（约 5.5 小时）的转出记录
-        // 对于新币来说，这个窗口足够捕捉其“销赃”动作
-        const logs = await provider.getLogs({
-            address: tokenAddress,
-            topics: [topic, walletPad], // From = wallet
-            fromBlock: Math.max(0, currentBlock - 10000),
-            toBlock: 'latest'
-        });
-
-        if (logs.length === 0) return 'NO_SELL'; // 还没卖，可能是钻石手
-
-        for (const log of logs) {
-            const parsed = iface.parseLog(log);
-            const to = parsed.args.to.toLowerCase();
-            if (CONFIG.KNOWN_ROUTERS.has(to)) return 'YES'; // 只要有一笔卖给了正规路由，就是良民
-        }
-        
-        // 有卖出记录，但没有任何一笔是给正规路由的 -> 极大概率是内鬼
-        return 'SUSPICIOUS';
-    } catch (e) {
-        return 'NO_SELL'; // RPC 报错时保守处理，不轻易拉黑
-    }
 }
 
 async function auditWallet(
