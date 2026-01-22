@@ -1,11 +1,8 @@
-import { Network, Alchemy } from "alchemy-sdk";
-import { ethers, BigNumber } from "ethers";
+import { ethers } from "ethers";
 import axios from "axios";
 import * as fs from "fs";
 import { DATA_DIR, LOCAL_RPC_URL } from "./common";
 
-// ================= 配置区域 =================
-const ALCHEMY_API_KEY = "Dy8qDdgHXfCqzP-o1Bw2X"; 
 const MIN_WALLET_VALUE_USD = 1000;
 
 const TOKENS: Record<string, string> = {
@@ -40,10 +37,6 @@ const FALLBACK_PRICES: Record<string, number> = {
     [TOKENS.USDC]: 1.0
 };
 
-// [修改] 移除 Alchemy SDK 的强依赖，改用本地 Provider
-// const settings = { apiKey: ALCHEMY_API_KEY, network: Network.BASE_MAINNET };
-// const alchemy = new Alchemy(settings);
-
 const provider = new ethers.providers.JsonRpcProvider(LOCAL_RPC_URL);
 
 export async function verifyWalletWealth(inputCandidates?: string[]): Promise<string[]> {
@@ -59,7 +52,6 @@ export async function verifyWalletWealth(inputCandidates?: string[]): Promise<st
         return [];
     }
     
-    // 测试本地节点连接
     try {
         const block = await provider.getBlockNumber();
         console.log(`[System] Connected to Local Node. Current Block: ${block}`);

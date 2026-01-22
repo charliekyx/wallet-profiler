@@ -23,8 +23,6 @@ const LOG_ABI = [
 export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promise<string[]> {
     TRANSFER_TOPIC = ethers.utils.id("Transfer(address,address,uint256)");
 
-    console.log(`\n[System] Wallet Profiler V4 (Smart Speed Edition)`);
-
     // [修改] 初始化双 Provider
     const remoteProvider = new ethers.providers.StaticJsonRpcProvider(REMOTE_RPC_URL);
     const localProvider = new ethers.providers.StaticJsonRpcProvider(LOCAL_RPC_URL);
@@ -45,9 +43,7 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
     // Fallback: 如果没有传入数据，尝试从文件读取
     if (targets.length === 0) {
         try {
-            const manualFile = `${DATA_DIR}/trending_dogs_manual.json`;
-            const autoFile = `${DATA_DIR}/trending_dogs.json`;
-            const targetFile = fs.existsSync(manualFile) ? manualFile : autoFile;
+            const targetFile =`${DATA_DIR}/trending_dogs.json`;
             if (fs.existsSync(targetFile)) {
                 targets = JSON.parse(fs.readFileSync(targetFile, "utf-8"));
                 console.log(`[System] Loaded ${targets.length} trending dogs from file.`);
@@ -83,7 +79,7 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
 
                     // 2. 扫描早期买家
                     const earlyBuyers = await traceEarlyBuyers(
-                        remoteProvider, // 必须用远程 (历史 Logs)
+                        remoteProvider,
                         target.address,
                         meta.createdAt,
                         currentBlock,
@@ -122,6 +118,8 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                     );
                                     if (!audit.pass) return;
 
+                                    const buyAmount = earlyBuyers.get(buyer) || ethers.BigNumber.from(0);
+
                                     // 2. 检查卖出行为与 PnL
                                     const sellInfo = await checkLegitSell(
                                         localProvider,
@@ -130,6 +128,7 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                         target.address,
                                         startCheckBlock,
                                         currentBlock,
+                                        buyAmount
                                     );
                                     if (sellInfo.status === "SUSPICIOUS") {
                                         globalBlacklist.add(buyer);
@@ -140,9 +139,6 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                         sellInfo.status === "YES" ||
                                         sellInfo.status === "NO_SELL"
                                     ) {
-                                        const buyAmount =
-                                            earlyBuyers.get(buyer) || ethers.BigNumber.from(0);
-
                                         // [优化逻辑]
                                         // 1. 计算总账面价值 = (已卖出数量 + 当前余额) * 当前价格
                                         // 2. 即使没卖(NO_SELL)，只要账面价值翻倍，也是我们要找的“传奇”
@@ -210,6 +206,7 @@ async function checkLegitSell(
     tokenAddress: string,
     startBlock: number,
     currentBlock: number,
+    buyAmount?: ethers.BigNumber,
 ): Promise<{
     status: "YES" | "NO_SELL" | "SUSPICIOUS";
     totalSold: ethers.BigNumber;
@@ -221,20 +218,22 @@ async function checkLegitSell(
     const tokenContract = new ethers.Contract(tokenAddress, LOG_ABI, localProvider); // 查余额用本地
 
     try {
-        // 并发获取日志和当前余额
-        const [logs, currentBalance]: [ethers.providers.Log[], ethers.BigNumber] =
-            await Promise.all([
-                getLogsInChunks(
+        // [优化] 优先检查本地余额。如果余额 >= 买入量，说明没卖，跳过远程日志查询
+        const currentBalance = await withRetry(() => tokenContract.balanceOf(wallet) as Promise<ethers.BigNumber>).catch(
+            () => ethers.BigNumber.from(0),
+        );
+
+        if (buyAmount && currentBalance.gte(buyAmount)) {
+            return { status: "NO_SELL", totalSold: ethers.BigNumber.from(0), currentBalance };
+        }
+
+        const logs = await getLogsInChunks(
                     remoteProvider, // 查日志用远程
                     startBlock,
                     currentBlock,
                     tokenAddress,
                     [topic, walletPad],
-                ),
-                withRetry(() => tokenContract.balanceOf(wallet) as Promise<ethers.BigNumber>).catch(
-                    () => ethers.BigNumber.from(0),
-                ),
-            ]);
+                );
 
         if (logs.length === 0)
             return { status: "NO_SELL", totalSold: ethers.BigNumber.from(0), currentBalance };
@@ -304,10 +303,6 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 5, delay = 2000): Pr
     }
 }
 
-// ... 保持其他 Helper 函数不变 ...
-// (为防止丢失，我这里简写了，请务必保留你原文件底部的那些辅助函数！)
-
-// --- Rest of Helpers (Copy from previous or keep existing) ---
 
 async function getTokenMetadata(address: string, fallback?: number) {
     try {
@@ -481,6 +476,10 @@ async function auditWallet(
         );
         if (nonceNow > CONFIG.FILTER_MAX_TOTAL_NONCE) return { pass: false, reason: "High" };
         if (nonceNow < 2) return { pass: false, reason: "Low" };
+
+        // [新增] 2.5 验资 (Local) - 提前过滤穷鬼/Burner，节省 Remote RPC
+        const balance = await withRetry(() => localProvider.getBalance(address) as Promise<ethers.BigNumber>);
+        if (balance.lt(ethers.utils.parseEther("0.002"))) return { pass: false, reason: "Poor" };
 
         try {
             // [付费] 3. 只有前两步通过，才用远程节点查历史 Nonce

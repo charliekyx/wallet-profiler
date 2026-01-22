@@ -25,13 +25,11 @@ const HARDCODED_DOGS = [
 ];
 
 export async function fetchTrending(): Promise<TrendingToken[]> {
-    console.log(`[System] Starting GeckoTerminal Trend Hunter (Deep Dive)...`);
+    console.log(`[System] Starting GeckoTerminal Trend Hunter`);
     console.log(`[System] Chain: ${CONFIG.CHAIN} | Depth: ${CONFIG.FETCH_PAGES} Pages | Max Age: ${CONFIG.MAX_AGE_HOURS}h`);
 
     try {
         let allPools: any[] = [];
-        
-        // ================= [新增] 分页抓取逻辑 =================
         for (let page = 1; page <= CONFIG.FETCH_PAGES; page++) {
             process.stdout.write(`[System] Fetching page ${page}/${CONFIG.FETCH_PAGES}... `);
             const url = `https://api.geckoterminal.com/api/v2/networks/${CONFIG.CHAIN}/trending_pools?include=base_token&page=${page}`;
@@ -39,7 +37,7 @@ export async function fetchTrending(): Promise<TrendingToken[]> {
             try {
                 const response = await axios.get(url, { 
                     timeout: 10000,
-                    headers: { "User-Agent": "Mozilla/5.0" } // 防止被拦截
+                    headers: { "User-Agent": "Mozilla/5.0" } 
                 });
                 
                 if (response.data && response.data.data) {
@@ -140,6 +138,7 @@ export async function fetchTrending(): Promise<TrendingToken[]> {
         console.log(`\n================ FINAL TARGET LIST (${candidates.length}) ================`);
         
         // 只取前 50 个最优质的，避免太长
+        // const topCandidates = candidates.slice(0, 50);
         const topCandidates = candidates.slice(0, 50);
         
         topCandidates.forEach((c, index) => {

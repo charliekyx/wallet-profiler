@@ -5,9 +5,18 @@ import { profileEarlyBuyers } from "./src/profile";
 import { verifyWalletWealth } from "./src/verify_wallets";
 import { findActiveTraders } from "./src/find_active_traders";
 
+process.on('uncaughtException', (error) => {
+    console.error(`[Fatal] Uncaught Exception:`, error);
+    process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+    console.error(`[Fatal] Unhandled Rejection:`, reason);
+    process.exit(1);
+});
+
 async function main() {
     console.log(`[System] Starting Golden Dog Hunter Pipeline`);
-    console.log(`This pipeline will find trending tokens, identify early buyers, verify their wealth, and check their activity.\n`);
 
     if (!fs.existsSync(DATA_DIR)) {
         fs.mkdirSync(DATA_DIR);
