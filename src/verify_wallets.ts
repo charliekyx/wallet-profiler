@@ -1,7 +1,8 @@
 import { Network, Alchemy } from "alchemy-sdk";
-import { ethers } from "ethers";
+import { ethers, BigNumber } from "ethers";
 import axios from "axios";
 import * as fs from "fs";
+import { DATA_DIR, LOCAL_RPC_URL } from "./common";
 
 // ================= 配置区域 =================
 const ALCHEMY_API_KEY = "Dy8qDdgHXfCqzP-o1Bw2X"; 
@@ -39,38 +40,57 @@ const FALLBACK_PRICES: Record<string, number> = {
     [TOKENS.USDC]: 1.0
 };
 
-const settings = { apiKey: ALCHEMY_API_KEY, network: Network.BASE_MAINNET };
-const alchemy = new Alchemy(settings);
+// [修改] 移除 Alchemy SDK 的强依赖，改用本地 Provider
+// const settings = { apiKey: ALCHEMY_API_KEY, network: Network.BASE_MAINNET };
+// const alchemy = new Alchemy(settings);
 
-async function main() {
-    console.log("🚀 Starting Wallet Wealth Verifier (FAIL-SAFE MODE)...");
+const provider = new ethers.providers.JsonRpcProvider(LOCAL_RPC_URL);
+
+export async function verifyWalletWealth(inputCandidates?: string[]): Promise<string[]> {
+    console.log("[System] Starting Wallet Wealth Verifier (FAIL-SAFE MODE)...");
     
-    const candidates = await loadCandidates();
+    let candidates = inputCandidates || [];
     if (candidates.length === 0) {
-        console.log("⚠️ No candidates found.");
-        return;
+        candidates = await loadCandidates();
+    }
+
+    if (candidates.length === 0) {
+        console.log("[System] No candidates found.");
+        return [];
     }
     
-    console.log("📈 Fetching prices...");
+    // 测试本地节点连接
+    try {
+        const block = await provider.getBlockNumber();
+        console.log(`[System] Connected to Local Node. Current Block: ${block}`);
+    } catch (e) {
+        console.error("[Error] Failed to connect to Local Node. Check LOCAL_RPC_URL.");
+        return;
+    }
+
+    console.log("[System] Fetching prices...");
     const prices = await getTokenPrices(Object.values(TOKENS));
     
     // [调试] 打印最终价格 (绝不会是 undefined)
-    console.log("💰 Final Price Table:");
+    console.log("[System] Final Price Table:");
     console.log(`   - AIXBT: $${prices[TOKENS.AIXBT.toLowerCase()].toFixed(4)}`);
     console.log(`   - LUNA:  $${prices[TOKENS.LUNA.toLowerCase()].toFixed(4)}`);
     console.log(`   - CLANKER: $${prices[TOKENS.CLANKER.toLowerCase()].toFixed(2)}`);
 
     const ethPrice = prices[TOKENS.WETH.toLowerCase()];
     const richList = [];
-    console.log("💰 Checking balances...");
+    console.log("[System] Checking balances...");
+
+    // 预先构建 ERC20 合约对象接口 (只读 balanceOf)
+    const erc20Abi = ["function balanceOf(address) view returns (uint256)"];
 
     for (let i = 0; i < candidates.length; i++) {
         const wallet = candidates[i];
         process.stdout.write(`\r   Checking ${i+1}/${candidates.length}: ${wallet.slice(0,6)}...`);
         try {
-            const ethBal = await alchemy.core.getBalance(wallet);
+            // [优化] 使用本地节点查询 ETH 余额 (免费)
+            const ethBal = await provider.getBalance(wallet);
             const ethVal = parseFloat(ethers.utils.formatEther(ethBal)) * ethPrice;
-            const tokenBals = await alchemy.core.getTokenBalances(wallet, Object.values(TOKENS));
             
             let totalTokenVal = 0;
             const holdingDetails: string[] = [];
@@ -80,13 +100,20 @@ async function main() {
                 holdingDetails.push(`ETH: $${ethVal.toFixed(0)}`);
             }
 
-            tokenBals.tokenBalances.forEach(t => {
-                const addr = t.contractAddress.toLowerCase();
-                // 只要价格存在（现在有保底，一定存在）
-                if (prices[addr] && t.tokenBalance && t.tokenBalance !== "0x0000000000000000000000000000000000000000000000000000000000000000") {
+            // [优化] 使用本地节点循环查询 Token 余额 (免费且极快)
+            // 相比 Alchemy getTokenBalances，这里虽然并发请求多，但走本地回环网络几乎无延迟
+            const tokenChecks = Object.values(TOKENS).map(async (tokenAddr) => {
+                const contract = new ethers.Contract(tokenAddr, erc20Abi, provider);
+                try {
+                    const bal = await contract.balanceOf(wallet);
+                    if (bal.isZero()) return;
+
+                    const addr = tokenAddr.toLowerCase();
                     let decimals = 18;
                     if (addr === TOKENS.USDC.toLowerCase()) decimals = 6;
-                    const valFmt = Number(BigInt(t.tokenBalance)) / (10 ** decimals);
+                    
+                    // 简单的格式化，不依赖复杂库
+                    const valFmt = parseFloat(ethers.utils.formatUnits(bal, decimals));
                     const usdVal = valFmt * prices[addr];
                     
                     if (usdVal > 10) {
@@ -94,8 +121,11 @@ async function main() {
                         const symbol = Object.keys(TOKENS).find(k => TOKENS[k].toLowerCase() === addr) || "UNKNOWN";
                         holdingDetails.push(`${symbol}: $${usdVal.toFixed(0)}`);
                     }
-                }
+                } catch (e) {}
             });
+
+            // 等待所有 Token 查询完成
+            await Promise.all(tokenChecks);
 
             const totalNetWorth = ethVal + totalTokenVal;
 
@@ -113,15 +143,18 @@ async function main() {
     }
 
     richList.sort((a, b) => b.netWorth - a.netWorth);
-    console.log(`\n\n================ 🏆 REAL WHALES FOUND (${richList.length}) 🏆 ================`);
+    console.log(`\n\n================ REAL WHALES FOUND (${richList.length}) ================`);
     richList.forEach(w => {
-        const icon = w.netWorth > 10000 ? "🐋" : "🐟";
+        const icon = w.netWorth > 10000 ? "[WHALE]" : "[FISH]";
         console.log(`${icon} [${w.address}] Worth: $${w.netWorth.toFixed(0)} | Holds: ${w.holdings}`);
     });
 
     const exportLines = richList.map(w => w.address);
-    fs.writeFileSync("verified_wallets.json", JSON.stringify(exportLines, null, 2));
-    console.log(`\n✅ Saved ${exportLines.length} wallets to verified_wallets.json`);
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
+    fs.writeFileSync(`${DATA_DIR}/verified_wallets.json`, JSON.stringify(exportLines, null, 2));
+    console.log(`\n[System] Saved ${exportLines.length} wallets to ${DATA_DIR}/verified_wallets.json`);
+
+    return exportLines;
 }
 
 async function getTokenPrices(addresses: string[]) {
@@ -168,7 +201,7 @@ async function getTokenPrices(addresses: string[]) {
     for (const [key, addr] of Object.entries(TOKENS)) {
         const lowerAddr = addr.toLowerCase();
         if (!priceMap[lowerAddr]) {
-            // console.log(`⚠️ Using Fallback price for ${key}`);
+            // console.log(`[System] Using Fallback price for ${key}`);
             priceMap[lowerAddr] = FALLBACK_PRICES[addr] || 0;
         }
     }
@@ -177,12 +210,18 @@ async function getTokenPrices(addresses: string[]) {
 }
 
 async function loadCandidates(): Promise<string[]> {
-    const files = fs.readdirSync('.');
-    const legendFiles = files.filter(f => f.startsWith('legends_base_') && f.endsWith('.txt'));
-    if (legendFiles.length === 0) return [];
-    legendFiles.sort().reverse();
-    const content = fs.readFileSync(legendFiles[0], 'utf-8');
-    return content.split('\n').map(l => l.match(/0x[a-fA-F0-9]{40}/)?.[0]).filter(Boolean) as string[];
+    if (!fs.existsSync(DATA_DIR)) return [];
+    const files = fs.readdirSync(DATA_DIR);
+    
+    // [修改] 优先读取新的 JSON 格式
+    if (fs.existsSync(`${DATA_DIR}/legends_base.json`)) {
+        const content = fs.readFileSync(`${DATA_DIR}/legends_base.json`, "utf-8");
+        return JSON.parse(content);
+    }
+    
+    return [];
 }
 
-main();
+if (require.main === module) {
+    verifyWalletWealth();
+}

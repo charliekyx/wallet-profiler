@@ -1,24 +1,18 @@
 import axios from "axios";
 import * as fs from "fs";
+import { DATA_DIR, TrendingToken } from "./common";
 
 // ================= 配置区域 =================
 const CONFIG = {
     CHAIN: "base",
-    
-    // [保持] 30天，允许老金狗进入
-    MAX_AGE_HOURS: 720,      
-    
-    // [门槛] 保持适中
-    MIN_LIQUIDITY_USD: 10000, 
+    MAX_AGE_HOURS: 720,// [保持] 30天，允许老金狗进入      
+    MIN_LIQUIDITY_USD: 10000,  // [门槛] 保持适中
     MIN_VOLUME_24H: 5000,   
     MIN_FDV: 10000,          
-
-    // [新增] 抓取深度：抓取前 10 页 (约 200 个池子) - 免费版 API 上限
-    // 只有抓得够深，才能在第 50-100 名里找到那些上线了 15-30 天的老币
-    FETCH_PAGES: 10,
+    FETCH_PAGES: 10, // 抓取深度：抓取前 10 页 (约 200 个池子) - 免费版 API 上限
 };
 
-// [新增] 手动注入的老金狗名单 (Base 链上的蓝筹 Meme)
+// 手动注入的老金狗名单 (Base 链上的蓝筹 Meme)
 // 这些币经历了时间的考验，持有者通常质量很高，必须包含在内
 const HARDCODED_DOGS = [
     { name: "BRETT", address: "0x532f27101965dd16442e59d40670faf5ebb142e4" },
@@ -30,16 +24,16 @@ const HARDCODED_DOGS = [
     { name: "HIGHER", address: "0x0578d8d485ebb2720521fb692b012495a070e3ed" }
 ];
 
-async function main() {
-    console.log(`🚀 Starting GeckoTerminal Trend Hunter (Deep Dive)...`);
-    console.log(`🎯 Chain: ${CONFIG.CHAIN} | Depth: ${CONFIG.FETCH_PAGES} Pages | Max Age: ${CONFIG.MAX_AGE_HOURS}h`);
+export async function fetchTrending(): Promise<TrendingToken[]> {
+    console.log(`[System] Starting GeckoTerminal Trend Hunter (Deep Dive)...`);
+    console.log(`[System] Chain: ${CONFIG.CHAIN} | Depth: ${CONFIG.FETCH_PAGES} Pages | Max Age: ${CONFIG.MAX_AGE_HOURS}h`);
 
     try {
         let allPools: any[] = [];
         
         // ================= [新增] 分页抓取逻辑 =================
         for (let page = 1; page <= CONFIG.FETCH_PAGES; page++) {
-            process.stdout.write(`📡 Fetching page ${page}/${CONFIG.FETCH_PAGES}... `);
+            process.stdout.write(`[System] Fetching page ${page}/${CONFIG.FETCH_PAGES}... `);
             const url = `https://api.geckoterminal.com/api/v2/networks/${CONFIG.CHAIN}/trending_pools?include=base_token&page=${page}`;
             
             try {
@@ -51,21 +45,21 @@ async function main() {
                 if (response.data && response.data.data) {
                     const pools = response.data.data;
                     allPools = allPools.concat(pools);
-                    console.log(`✅ Found ${pools.length} pools.`);
+                    console.log(`[Success] Found ${pools.length} pools.`);
                 } else {
-                    console.log(`⚠️ No data.`);
+                    console.log(`[System] No data.`);
                 }
                 
                 // 礼貌等待，防止触发 API 限制 (30 req/min)
                 await new Promise(r => setTimeout(r, 1500));
                 
             } catch (e) {
-                console.log(`❌ Error fetching page ${page}: ${(e as any).message}`);
+                console.log(`[Error] Error fetching page ${page}: ${(e as any).message}`);
             }
         }
         // ========================================================
 
-        console.log(`\n🌊 Total candidates fetched: ${allPools.length}. Filtering...`);
+        console.log(`\n[System] Total candidates fetched: ${allPools.length}. Filtering...`);
 
         const now = Date.now();
         const candidates = [];
@@ -117,7 +111,7 @@ async function main() {
         }
 
         // 2. 注入 Hardcoded Dogs (如果 API 没抓到)
-        console.log(`\n💉 Injecting ${HARDCODED_DOGS.length} legendary dogs...`);
+        console.log(`\n[System] Injecting ${HARDCODED_DOGS.length} legendary dogs...`);
         for (const dog of HARDCODED_DOGS) {
             const addr = dog.address.toLowerCase();
             if (!seenAddresses.has(addr)) {
@@ -143,7 +137,7 @@ async function main() {
         candidates.sort((a, b) => b.volume - a.volume);
 
         // 4. 输出结果
-        console.log(`\n================ 💎 FINAL TARGET LIST (${candidates.length}) ================`);
+        console.log(`\n================ FINAL TARGET LIST (${candidates.length}) ================`);
         
         // 只取前 50 个最优质的，避免太长
         const topCandidates = candidates.slice(0, 50);
@@ -155,17 +149,22 @@ async function main() {
         });
 
         // 5. 保存文件
-        const pipelineData = topCandidates.map(c => ({
+        const pipelineData: TrendingToken[] = topCandidates.map(c => ({
             name: c.name,
             address: c.address,
             fallbackTime: c.fallbackTime
         }));
-        fs.writeFileSync("trending_dogs.json", JSON.stringify(pipelineData, null, 2));
-        console.log(`\n✅ Saved ${topCandidates.length} dogs to trending_dogs.json for pipeline.`);
+        if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
+        fs.writeFileSync(`${DATA_DIR}/trending_dogs.json`, JSON.stringify(pipelineData, null, 2));
+        console.log(`\n[Success] Saved ${topCandidates.length} dogs to ${DATA_DIR}/trending_dogs.json for pipeline.`);
 
+        return pipelineData;
     } catch (e) {
-        console.error("❌ Fatal Error:", (e as any).message);
+        console.error("[Error] Fatal Error:", (e as any).message);
+        return [];
     }
 }
 
-main();
+if (require.main === module) {
+    fetchTrending();
+}
