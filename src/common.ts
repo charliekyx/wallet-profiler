@@ -22,7 +22,7 @@ export const PROFILE_CONFIG = {
 
     // [加速配置]
     VERIFY_BATCH_SIZE: 2, // 降低并发，防止触发 Alchemy/Infura 429 限流 (Free Tier safe: 2)
-    CONCURRENT_TOKENS: 1, // 降低并发 (Process 1 token at a time)
+    CONCURRENT_TOKENS: 2, // 降低并发 (Process 1 token at a time)
     RPC_CHUNK_SIZE: 10, // RPC 分片大小 (Free Tier limit is 10 blocks)
 };
 
