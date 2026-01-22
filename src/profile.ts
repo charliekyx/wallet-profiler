@@ -118,7 +118,9 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                     );
                                     if (!audit.pass) return;
 
-                                    const buyAmount = earlyBuyers.get(buyer) || ethers.BigNumber.from(0);
+                                    const buyerData = earlyBuyers.get(buyer);
+                                    if (!buyerData) return;
+                                    const { amount: buyAmount, firstBlock: firstBuyBlock } = buyerData;
 
                                     // 2. 检查卖出行为与 PnL
                                     const sellInfo = await checkLegitSell(
@@ -135,29 +137,36 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                         return;
                                     }
 
-                                    if (
-                                        sellInfo.status === "YES" ||
-                                        sellInfo.status === "NO_SELL"
-                                    ) {
-                                        // [优化逻辑]
-                                        // 1. 计算总账面价值 = (已卖出数量 + 当前余额) * 当前价格
-                                        // 2. 即使没卖(NO_SELL)，只要账面价值翻倍，也是我们要找的“传奇”
+                                    // [Smart Money Mode] 优质波段交易者筛选
+                                    // 逻辑：买得早不重要，卖在最高点才重要。
+                                    // 1. 必须有卖出行为 (status === "YES")
+                                    // 2. 持仓时间 > 1小时 (Base链 ~1800块)
+                                    // 3. 卖出均价 / 买入均价 > 2.0 (PnL > 2x)
+
+                                    if (sellInfo.status === "YES") {
+                                        // 检查持仓时间
+                                        const holdBlocks = sellInfo.lastSellBlock - firstBuyBlock;
+                                        // Base block time ~2s. 1 hour = 3600s = 1800 blocks.
+                                        if (holdBlocks < 1800) return;
+
+                                        // PnL 计算
                                         const totalAccountedTokens = sellInfo.totalSold.add(
                                             sellInfo.currentBalance,
                                         );
+                                        
+                                        // 近似计算：假设卖出价格接近当前价格 (由于缺乏历史价格API，这是目前的最优解)
+                                        // 或者：如果 totalSold > 0，说明已经变现。
                                         const totalValueUSD =
                                             parseFloat(
                                                 ethers.utils.formatEther(totalAccountedTokens),
                                             ) * meta.currentPrice;
+                                            
                                         const costBasisUSD =
                                             parseFloat(ethers.utils.formatEther(buyAmount)) *
                                             meta.initialPriceEstimate;
 
-                                        // 如果账面价值 > 成本的 N 倍，或者卖出数量已经超过买入的一半且价格在涨
-                                        if (
-                                            totalValueUSD >
-                                            costBasisUSD * CONFIG.MIN_PNL_MULTIPLIER
-                                        ) {
+                                        // 检查 PnL > 2.0
+                                        if (costBasisUSD > 0 && (totalValueUSD / costBasisUSD) > 2.0) {
                                             if (!walletHits[buyer]) walletHits[buyer] = [];
                                             walletHits[buyer].push(target.name);
                                             hitCount++;
@@ -211,6 +220,7 @@ async function checkLegitSell(
     status: "YES" | "NO_SELL" | "SUSPICIOUS";
     totalSold: ethers.BigNumber;
     currentBalance: ethers.BigNumber;
+    lastSellBlock: number;
 }> {
     const topic = ethers.utils.id("Transfer(address,address,uint256)");
     const walletPad = ethers.utils.hexZeroPad(wallet, 32);
@@ -224,7 +234,7 @@ async function checkLegitSell(
         );
 
         if (buyAmount && currentBalance.gte(buyAmount)) {
-            return { status: "NO_SELL", totalSold: ethers.BigNumber.from(0), currentBalance };
+            return { status: "NO_SELL", totalSold: ethers.BigNumber.from(0), currentBalance, lastSellBlock: 0 };
         }
 
         const logs = await getLogsInChunks(
@@ -236,10 +246,11 @@ async function checkLegitSell(
                 );
 
         if (logs.length === 0)
-            return { status: "NO_SELL", totalSold: ethers.BigNumber.from(0), currentBalance };
+            return { status: "NO_SELL", totalSold: ethers.BigNumber.from(0), currentBalance, lastSellBlock: 0 };
 
         let totalSold = ethers.BigNumber.from(0);
         let hasLegitSell = false;
+        let lastSellBlock = 0;
 
         for (const log of logs) {
             // 从 Topic2 提取接收者地址 (indexed to)
@@ -251,16 +262,17 @@ async function checkLegitSell(
             if (DEX_ROUTERS.has(to)) {
                 hasLegitSell = true;
                 totalSold = totalSold.add(parsed.args.value);
+                lastSellBlock = Math.max(lastSellBlock, log.blockNumber);
             } else {
                 const code = await withRetry(
                     () => localProvider.getCode(to) as Promise<string>,
                 ).catch(() => "0x");
                 if (code !== "0x" && to !== tokenAddress.toLowerCase())
-                    return { status: "SUSPICIOUS", totalSold, currentBalance };
+                    return { status: "SUSPICIOUS", totalSold, currentBalance, lastSellBlock: 0 };
             }
         }
 
-        return { status: hasLegitSell ? "YES" : "NO_SELL", totalSold, currentBalance };
+        return { status: hasLegitSell ? "YES" : "NO_SELL", totalSold, currentBalance, lastSellBlock };
     } catch (e) {
         console.error(
             `      [Error] [${tokenAddress}] checkLegitSell Error for ${wallet}: ${(e as any).message}`,
@@ -269,6 +281,7 @@ async function checkLegitSell(
             status: "NO_SELL",
             totalSold: ethers.BigNumber.from(0),
             currentBalance: ethers.BigNumber.from(0),
+            lastSellBlock: 0,
         };
     }
 }
@@ -341,17 +354,29 @@ async function traceEarlyBuyers(
     address: string,
     createdAtTimestamp: number,
     currentBlock: number,
-): Promise<Map<string, ethers.BigNumber>> {
-    const buyers = new Map<string, ethers.BigNumber>();
+): Promise<Map<string, { amount: ethers.BigNumber; firstBlock: number }>> {
+    const buyers = new Map<string, { amount: ethers.BigNumber; firstBlock: number }>();
     const targetTimestampSec = Math.floor(createdAtTimestamp / 1000);
     const startBlock = await getBlockByTimestamp(provider, targetTimestampSec, currentBlock);
-    const searchStart = Math.max(0, startBlock - CONFIG.LOOKBACK_BUFFER_BLOCKS);
-    const searchEnd = Math.min(currentBlock, startBlock + CONFIG.SNIPE_WINDOW_BLOCKS);
+    
+    // [修改] Copy Trade 策略：搜索窗口扩大到开盘后 ~45 分钟 (Base链 ~1350块)
+    // 目标是找到"早期发现者"而不是"开盘机器人"
+    const COPY_WINDOW = 1350; 
+    const searchStart = Math.max(0, startBlock);
+    const searchEnd = Math.min(currentBlock, startBlock + COPY_WINDOW);
+
     const logs = await getLogsInChunks(provider, searchStart, searchEnd, address, [TRANSFER_TOPIC]);
     if (logs.length === 0) return buyers;
     const firstSwapBlock = logs[0].blockNumber;
-    const snipeWindowEnd = firstSwapBlock + CONFIG.SNIPE_WINDOW_BLOCKS;
-    const earlyLogs = logs.filter((l) => l.blockNumber <= snipeWindowEnd);
+    
+    // [修改] 避开前 5 个区块。Copy Trade 无法跟单 Block 0-5 的交易，排除这些不可复制的 Sniper
+    const SKIP_MEV_BLOCKS = 5;
+    
+    const earlyLogs = logs.filter((l) => 
+        l.blockNumber >= firstSwapBlock + SKIP_MEV_BLOCKS && 
+        l.blockNumber <= firstSwapBlock + COPY_WINDOW
+    );
+
     const INFRA_BLACKLIST = new Set([
         "0x2948acbbc8795267e62a1220683a48e718b52585", // BaseSwap
         "0x8c1a3cf8f83074169fe5d7ad50b978e1cd6b37c7", // AlienBase
@@ -369,8 +394,11 @@ async function traceEarlyBuyers(
             if (!parsed) continue;
             const to = parsed.args.to.toLowerCase();
             if (!INFRA_BLACKLIST.has(to) && to !== address.toLowerCase()) {
-                const current = buyers.get(to) || ethers.BigNumber.from(0);
-                buyers.set(to, current.add(parsed.args.value));
+                const current = buyers.get(to) || { amount: ethers.BigNumber.from(0), firstBlock: log.blockNumber };
+                buyers.set(to, {
+                    amount: current.amount.add(parsed.args.value),
+                    firstBlock: Math.min(current.firstBlock, log.blockNumber)
+                });
             }
         } catch (e) {}
     }
@@ -474,8 +502,11 @@ async function auditWallet(
         const nonceNow = await withRetry(
             () => localProvider.getTransactionCount(address, "latest") as Promise<number>,
         );
-        if (nonceNow > CONFIG.FILTER_MAX_TOTAL_NONCE) return { pass: false, reason: "High" };
-        if (nonceNow < 2) return { pass: false, reason: "Low" };
+        
+        // [修改] Copy Trade 策略：放宽 Nonce 上限，允许活跃交易者 (50k)，但过滤 CEX
+        if (nonceNow > 50000) return { pass: false, reason: "High" };
+        // [修改] 提高门槛，过滤掉只有 1-4 笔交易的纯新号 (通常是 Burner/Bot)
+        if (nonceNow < 5) return { pass: false, reason: "Low" };
 
         // [新增] 2.5 验资 (Local) - 提前过滤穷鬼/Burner，节省 Remote RPC
         const balance = await withRetry(() => localProvider.getBalance(address) as Promise<ethers.BigNumber>);
@@ -487,8 +518,9 @@ async function auditWallet(
                 () => remoteProvider.getTransactionCount(address, pastBlock) as Promise<number>,
             );
             const delta = nonceNow - noncePast;
-            if (delta < CONFIG.FILTER_MIN_WEEKLY_TXS) return { pass: false, reason: "Inactive" };
-            if (delta > CONFIG.FILTER_MAX_WEEKLY_TXS) return { pass: false, reason: "Freq" };
+            // [修改] 只要不是死号即可，移除高频限制
+            if (delta < 1) return { pass: false, reason: "Inactive" };
+            // if (delta > CONFIG.FILTER_MAX_WEEKLY_TXS) return { pass: false, reason: "Freq" };
         } catch (e) {
             console.error(
                 `      [Warning] [Audit] RPC Error for ${address} at pastBlock: ${(e as any).message}`,
