@@ -177,6 +177,9 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                     }
                                 }),
                             );
+
+                            // [Rate Limit] Add delay between batches to let CU bucket refill
+                            await new Promise((r) => setTimeout(r, 1000));
                         }
                         console.log(
                             `   [Success] [${target.name}] Finished. Growth: ${tokenGrowth.toFixed(1)}x | Captured ${hitCount} snipers.`,
@@ -431,6 +434,20 @@ async function getLogsInChunks(
     address: string,
     topics: any[],
 ): Promise<ethers.providers.Log[]> {
+    // [Fix] Respect RPC_CHUNK_SIZE to avoid "10 block range" error on free tier
+    const chunkSize = CONFIG.RPC_CHUNK_SIZE;
+    if (toBlock - fromBlock + 1 > chunkSize) {
+        let allLogs: ethers.providers.Log[] = [];
+        for (let i = fromBlock; i <= toBlock; i += chunkSize) {
+            const end = Math.min(i + chunkSize - 1, toBlock);
+            const logs = await getLogsInChunks(provider, i, end, address, topics);
+            allLogs = allLogs.concat(logs);
+            // [Rate Limit] Small delay between log chunks
+            await new Promise((r) => setTimeout(r, 200));
+        }
+        return allLogs;
+    }
+
     if (fromBlock > toBlock) return [];
     let retries = 5;
     while (retries > 0) {

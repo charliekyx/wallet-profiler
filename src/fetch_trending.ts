@@ -9,7 +9,7 @@ const CONFIG = {
     MIN_LIQUIDITY_USD: 10000,  // [门槛] 保持适中
     MIN_VOLUME_24H: 5000,   
     MIN_FDV: 10000,          
-    FETCH_PAGES: 10, // 抓取深度：抓取前 10 页 (约 200 个池子) - 免费版 API 上限
+    FETCH_PAGES: 20, // 抓取深度：抓取前 10 页 (约 200 个池子) - 免费版 API 上限
 };
 
 // 手动注入的老金狗名单 (Base 链上的蓝筹 Meme)
