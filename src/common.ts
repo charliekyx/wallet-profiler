@@ -2,6 +2,7 @@ import * as path from "path";
 
 // 使用 path.resolve 确保路径是绝对路径，避免因运行目录不同导致找不到文件
 export const DATA_DIR = path.resolve(__dirname, "../data");
+export const BLACKLIST_FILE = path.join(DATA_DIR, "blacklist.json");
 
 export const LOCAL_RPC_URL = "http://127.0.0.1:8545";
 export const ALCHEMY_API_KEY = "Dy8qDdgHXfCqzP-o1Bw2X";
@@ -10,7 +11,8 @@ export const REMOTE_RPC_URL = ALCHEMY_BASE_RPC_URL;
 
 export const PROFILE_CONFIG = {
     MIN_HIT_COUNT: 1,
-    SNIPE_WINDOW_BLOCKS: 900,
+    GENESIS_WINDOW_BLOCKS: 7200, // [Mode A] 4 Hours (Base ~2s block)
+    SWING_WINDOW_BLOCKS: 43200, // [Mode B] 24 Hours (大幅缩短以适应 Free Tier)
     LOOKBACK_BUFFER_BLOCKS: 3000,
     FILTER_MAX_TOTAL_NONCE: 15000,
     FILTER_RECENT_DAYS: 7,
@@ -58,4 +60,5 @@ export interface TrendingToken {
     name: string;
     address: string;
     fallbackTime: number;
+    ageHours?: string;
 }

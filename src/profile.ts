@@ -5,6 +5,7 @@ import axios from "axios";
 import * as fs from "fs";
 import {
     DATA_DIR,
+    BLACKLIST_FILE,
     LOCAL_RPC_URL,
     REMOTE_RPC_URL,
     PROFILE_CONFIG as CONFIG,
@@ -36,7 +37,13 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
     }
 
     const walletHits: Record<string, string[]> = {};
-    const globalBlacklist = new Set<string>(); // 全局黑名单
+    
+    // [优化] 持久化黑名单加载
+    let globalBlacklist = new Set<string>();
+    if (fs.existsSync(BLACKLIST_FILE)) {
+        const loaded = JSON.parse(fs.readFileSync(BLACKLIST_FILE, "utf-8"));
+        globalBlacklist = new Set(loaded);
+    }
 
     let targets: TrendingToken[] = inputTargets || [];
 
@@ -77,20 +84,43 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                     const tokenGrowth =
                         meta.currentPrice > 0 ? meta.currentPrice / meta.initialPriceEstimate : 0;
 
-                    // 2. 扫描早期买家
-                    const earlyBuyers = await traceEarlyBuyers(
+                    // ================= [Strategy Selector] =================
+                    // Mode A: Genesis Hunter (New Tokens < 7 days)
+                    // Mode B: Swing Master (Old Tokens > 7 days)
+                    const isOldDog = parseFloat(target.ageHours || "0") > 168;
+                    let searchStart = 0;
+                    let searchEnd = 0;
+
+                    if (isOldDog) {
+                        // [Mode B] Swing Master: Scan last 30 days
+                        console.log(`   [Strategy] ${target.name} is an OLD DOG. Using Swing Master Mode (Last 30d).`);
+                        searchEnd = currentBlock;
+                        searchStart = Math.max(0, currentBlock - CONFIG.SWING_WINDOW_BLOCKS);
+                    } else {
+                        // [Mode A] Genesis Hunter: Scan first 4 hours
+                        console.log(`   [Strategy] ${target.name} is a NEW DOG. Using Genesis Hunter Mode.`);
+                        const targetTimestampSec = Math.floor(meta.createdAt / 1000);
+                        const birthBlock = await getBlockByTimestamp(localProvider, targetTimestampSec, currentBlock);
+                        
+                        const SKIP_MEV_BLOCKS = 5;
+                        searchStart = birthBlock + SKIP_MEV_BLOCKS;
+                        searchEnd = Math.min(currentBlock, birthBlock + CONFIG.GENESIS_WINDOW_BLOCKS);
+                    }
+
+                    // 2. 扫描买家 (通用逻辑)
+                    const buyersMap = await scanBuyers(
                         remoteProvider,
                         target.address,
-                        meta.createdAt,
-                        currentBlock,
+                        searchStart,
+                        searchEnd
                     );
 
                     console.log(
-                        `   [System] [${target.name}] Found ${earlyBuyers.size} early buyers. Starting audit...`,
+                        `   [System] [${target.name}] Found ${buyersMap.size} candidates in range [${searchStart} -> ${searchEnd}]. Starting audit...`,
                     );
 
-                    if (earlyBuyers.size > 0) {
-                        const buyerList = Array.from(earlyBuyers.keys());
+                    if (buyersMap.size > 0) {
+                        const buyerList = Array.from(buyersMap.keys());
                         const pastBlock = currentBlock - 43200 * CONFIG.FILTER_RECENT_DAYS;
 
                         // 智能计算起始区块 (45天或代币出生日)
@@ -108,6 +138,8 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
 
                             await Promise.all(
                                 chunk.map(async (buyer) => {
+                                    if (globalBlacklist.has(buyer)) return;
+
                                     // 1. 先审 Nonce (过滤 Bot/新号，减少后续昂贵的 RPC 调用)
                                     const audit = await auditWallet(
                                         localProvider,
@@ -118,7 +150,7 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                     );
                                     if (!audit.pass) return;
 
-                                    const buyerData = earlyBuyers.get(buyer);
+                                    const buyerData = buyersMap.get(buyer);
                                     if (!buyerData) return;
                                     const { amount: buyAmount, firstBlock: firstBuyBlock } = buyerData;
 
@@ -137,41 +169,48 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                         return;
                                     }
 
-                                    // [Smart Money Mode] 优质波段交易者筛选
-                                    // 逻辑：买得早不重要，卖在最高点才重要。
-                                    // 1. 必须有卖出行为 (status === "YES")
-                                    // 2. 持仓时间 > 1小时 (Base链 ~1800块)
-                                    // 3. 卖出均价 / 买入均价 > 2.0 (PnL > 2x)
+                                    // ================= [The Paper Hand Fix] =================
+                                    // 逻辑：不要只看卖了多少，要看剩了多少。
+                                    // 只有当 retentionRate > 10% 时，才计算 PnL。
+                                    // 这样过滤掉了所有"卖飞"的人。
 
-                                    if (sellInfo.status === "YES") {
-                                        // 检查持仓时间
-                                        const holdBlocks = sellInfo.lastSellBlock - firstBuyBlock;
-                                        // Base block time ~2s. 1 hour = 3600s = 1800 blocks.
-                                        if (holdBlocks < 1800) return;
+                                    const currentBalance = sellInfo.currentBalance;
+                                    
+                                    // 计算持仓率 (0-100)
+                                    let retentionRate = 0;
+                                    if (buyAmount.gt(0)) {
+                                        retentionRate = currentBalance.mul(100).div(buyAmount).toNumber();
+                                    }
 
-                                        // PnL 计算
-                                        const totalAccountedTokens = sellInfo.totalSold.add(
-                                            sellInfo.currentBalance,
-                                        );
+                                    // 门槛：至少持有 10% 的原始仓位 (证明还在车上)
+                                    if (retentionRate > 10) {
+                                        // 计算 PnL (只基于剩余持仓 + 已实现部分，或者保守点只看剩余部分)
+                                        // 这里采用保守策略：如果 [剩余持仓价值] > [总成本 * 2]，那绝对是神
                                         
-                                        // 近似计算：假设卖出价格接近当前价格 (由于缺乏历史价格API，这是目前的最优解)
-                                        // 或者：如果 totalSold > 0，说明已经变现。
-                                        const totalValueUSD =
-                                            parseFloat(
-                                                ethers.utils.formatEther(totalAccountedTokens),
-                                            ) * meta.currentPrice;
-                                            
-                                        const costBasisUSD =
-                                            parseFloat(ethers.utils.formatEther(buyAmount)) *
-                                            meta.initialPriceEstimate;
+                                        const currentValueUSD = parseFloat(ethers.utils.formatEther(currentBalance)) * meta.currentPrice;
+                                        
+                                        // 成本计算：
+                                        // Genesis Mode: 使用 initialPriceEstimate
+                                        // Swing Mode: 理想情况用买入时价格，但没有API。
+                                        // 近似方案：Swing Mode 下，如果他买入后现在还在持有且价值很高，我们假设他是对的。
+                                        // 为了统一，我们这里还是用 initialPriceEstimate (注意：对老币这会偏低，导致 PnL 虚高，
+                                        // 但我们主要靠 retentionRate 和 audit 过滤)。
+                                        // *更优解*：对于老币，我们假设成本是当前价格的 50% (假设他是抄底的)，或者简单地只看持仓金额。
+                                        
+                                        const costPrice = isOldDog ? meta.currentPrice * 0.5 : meta.initialPriceEstimate;
+                                        const costBasisUSD = parseFloat(ethers.utils.formatEther(buyAmount)) * costPrice;
 
-                                        // 检查 PnL > 2.0
-                                        if (costBasisUSD > 0 && (totalValueUSD / costBasisUSD) > 2.0) {
+                                        // 判定标准：
+                                        // 1. 还没卖完 (Retention > 10)
+                                        // 2. 账面浮盈 > 2倍总成本 (说明买的位置极好，或者拿得极久)
+                                        // 3. 或者是 Swing Mode 下的大额持仓者
+                                        
+                                        if (costBasisUSD > 0 && currentValueUSD > costBasisUSD * 2) {
                                             if (!walletHits[buyer]) walletHits[buyer] = [];
                                             walletHits[buyer].push(target.name);
                                             hitCount++;
                                             console.log(
-                                                `      [Legend] [${target.name}] Found Legend: ${buyer} (${(totalValueUSD / costBasisUSD).toFixed(1)}x)`,
+                                                `      [Legend] [${target.name}] Found Legend: ${buyer} (${(currentValueUSD / costBasisUSD).toFixed(1)}x)`,
                                             );
                                         }
                                     }
@@ -199,6 +238,10 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
         console.log(
             `\n[System] Executing Global Ban on ${globalBlacklist.size} suspicious wallets...`,
         );
+        // 保存黑名单
+        fs.writeFileSync(BLACKLIST_FILE, JSON.stringify(Array.from(globalBlacklist), null, 2));
+        console.log(`[System] Updated blacklist saved to ${BLACKLIST_FILE}`);
+
         for (const badActor of globalBlacklist) {
             if (walletHits[badActor]) delete walletHits[badActor];
         }
@@ -352,33 +395,17 @@ async function getTokenMetadata(address: string, fallback?: number) {
     }
 }
 
-async function traceEarlyBuyers(
+async function scanBuyers(
     provider: any,
     address: string,
-    createdAtTimestamp: number,
-    currentBlock: number,
+    fromBlock: number,
+    toBlock: number,
 ): Promise<Map<string, { amount: ethers.BigNumber; firstBlock: number }>> {
     const buyers = new Map<string, { amount: ethers.BigNumber; firstBlock: number }>();
-    const targetTimestampSec = Math.floor(createdAtTimestamp / 1000);
-    const startBlock = await getBlockByTimestamp(provider, targetTimestampSec, currentBlock);
     
-    // [修改] Copy Trade 策略：搜索窗口扩大到开盘后 ~45 分钟 (Base链 ~1350块)
-    // 目标是找到"早期发现者"而不是"开盘机器人"
-    const COPY_WINDOW = 1350; 
-    const searchStart = Math.max(0, startBlock);
-    const searchEnd = Math.min(currentBlock, startBlock + COPY_WINDOW);
-
-    const logs = await getLogsInChunks(provider, searchStart, searchEnd, address, [TRANSFER_TOPIC]);
+    // 使用传入的 block range，不再内部计算
+    const logs = await getLogsInChunks(provider, fromBlock, toBlock, address, [TRANSFER_TOPIC]);
     if (logs.length === 0) return buyers;
-    const firstSwapBlock = logs[0].blockNumber;
-    
-    // [修改] 避开前 5 个区块。Copy Trade 无法跟单 Block 0-5 的交易，排除这些不可复制的 Sniper
-    const SKIP_MEV_BLOCKS = 5;
-    
-    const earlyLogs = logs.filter((l) => 
-        l.blockNumber >= firstSwapBlock + SKIP_MEV_BLOCKS && 
-        l.blockNumber <= firstSwapBlock + COPY_WINDOW
-    );
 
     const INFRA_BLACKLIST = new Set([
         "0x2948acbbc8795267e62a1220683a48e718b52585", // BaseSwap
@@ -391,7 +418,7 @@ async function traceEarlyBuyers(
     ]);
 
     const iface = new ethers.utils.Interface(LOG_ABI);
-    for (const log of earlyLogs) {
+    for (const log of logs) {
         try {
             const parsed = iface.parseLog(log);
             if (!parsed) continue;

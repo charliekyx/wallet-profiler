@@ -9,7 +9,7 @@ const CONFIG = {
     MIN_LIQUIDITY_USD: 10000,  // [门槛] 保持适中
     MIN_VOLUME_24H: 5000,   
     MIN_FDV: 10000,          
-    FETCH_PAGES: 20, // 抓取深度：抓取前 10 页 (约 200 个池子) - 免费版 API 上限
+    FETCH_PAGES: 10, // 抓取深度：抓取前 10 页 (约 200 个池子) - 免费版 API 上限
 };
 
 // 手动注入的老金狗名单 (Base 链上的蓝筹 Meme)
@@ -21,7 +21,12 @@ const HARDCODED_DOGS = [
     { name: "KEYCAT", address: "0x9a26f5433671751c3276a065f57e5a02d281797d" },
     { name: "MOG", address: "0x2Da56AcB9Ea78330f947bD57C54119Debda7AF71" },
     { name: "VIRTUAL", address: "0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b" },
-    { name: "HIGHER", address: "0x0578d8d485ebb2720521fb692b012495a070e3ed" }
+    { name: "HIGHER", address: "0x0578d8d485ebb2720521fb692b012495a070e3ed" },
+    { name: "BENJI", address: "0xbc45647ea894030a4e9801ec03479739fa2485f0" },
+    { name: "MIGGLES", address: "0xb1a03eda10342529ab8f34b31e5e7b51b7a40363" },
+    { name: "MFER", address: "0xe3086852a4b125803c815a158249ae46c7f25283" },
+    { name: "AERO", address: "0x940181a94a35a4569e4529a3cdfb74e38fd98631" },
+    { name: "CHOMP", address: "0x48e14620579e0000a65e75185d2630d421852100" }
 ];
 
 export async function fetchTrending(): Promise<TrendingToken[]> {
@@ -151,7 +156,8 @@ export async function fetchTrending(): Promise<TrendingToken[]> {
         const pipelineData: TrendingToken[] = topCandidates.map(c => ({
             name: c.name,
             address: c.address,
-            fallbackTime: c.fallbackTime
+            fallbackTime: c.fallbackTime,
+            ageHours: c.ageHours
         }));
         if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
         fs.writeFileSync(`${DATA_DIR}/trending_dogs.json`, JSON.stringify(pipelineData, null, 2));
