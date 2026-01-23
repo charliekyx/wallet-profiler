@@ -11,7 +11,6 @@ import {
     PROFILE_CONFIG as CONFIG,
     DEX_ROUTERS,
     TrendingToken,
-    checkWalletPnL,
 } from "./common";
 
 // ================= [Configuration V4: Smart Speed] =================
@@ -82,14 +81,6 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                     const meta = await getTokenMetadata(target.address, target.fallbackTime);
                     if (!meta) return;
 
-                    // [新增] 1.1 死狗过滤 (Dead Dog Filter)
-                    // 如果币龄 > 6天 (144h) 且 FDV < $500k，说明是僵尸币，里面的"早期买家"大概率是被套的
-                    const ageHours = (Date.now() - meta.createdAt) / 3600000;
-                    if (ageHours > 144 && meta.fdv < 500000) {
-                        console.log(`   [Skip] ${target.name} is a dead old dog (Age: ${ageHours.toFixed(1)}h, FDV: $${(meta.fdv/1000).toFixed(0)}k)`);
-                        return;
-                    }
-
                     const tokenGrowth =
                         meta.currentPrice > 0 ? meta.currentPrice / meta.initialPriceEstimate : 0;
 
@@ -132,6 +123,10 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                         const buyerList = Array.from(buyersMap.keys());
                         const pastBlock = currentBlock - 43200 * CONFIG.FILTER_RECENT_DAYS;
 
+                        // 智能计算起始区块 (45天或代币出生日)
+                        const lookbackBlocks = 2000000;
+                        const startCheckBlock = Math.max(0, currentBlock - lookbackBlocks);
+
                         let hitCount = 0;
 
                         // [核心优化] 针对每一个 wallet 进行深度审计
@@ -159,102 +154,72 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                     if (!buyerData) return;
                                     const { amount: buyAmount, firstBlock: firstBuyBlock } = buyerData;
 
-                                    // 1. 基础审计：过滤小额杂鱼
-                                    if (buyAmount.lt(ethers.utils.parseEther("0.05"))) return;
+                                    // 2. 检查卖出行为与 PnL
+                                    const sellInfo = await checkLegitSell(
+                                        localProvider,
+                                        remoteProvider,
+                                        buyer,
+                                        target.address,
+                                        startCheckBlock,
+                                        currentBlock,
+                                        buyAmount
+                                    );
+                                    if (sellInfo.status === "SUSPICIOUS") {
+                                        globalBlacklist.add(buyer);
+                                        return;
+                                    }
 
-                                    // 2. 获取当前余额
-                                    const tokenContract = new ethers.Contract(target.address, LOG_ABI, localProvider);
-                                    const currentBalance = await withRetry(() => tokenContract.balanceOf(buyer) as Promise<ethers.BigNumber>).catch(() => ethers.BigNumber.from(0));
+                                    // ================= [The Paper Hand Fix] =================
+                                    // 逻辑：不要只看卖了多少，要看剩了多少。
+                                    // 只有当 retentionRate > 10% 时，才计算 PnL。
+                                    // 这样过滤掉了所有"卖飞"的人。
 
-                                    // 3. 计算留存率
+                                    const currentBalance = sellInfo.currentBalance;
+                                    
+                                    // 计算持仓率 (0-100)
                                     let retentionRate = 0;
-                                    if (!buyAmount.isZero()) {
+                                    if (buyAmount.gt(0)) {
                                         retentionRate = currentBalance.mul(100).div(buyAmount).toNumber();
                                     }
 
-                                    // 4. 计算当前浮盈倍数
-                                    // [修复] 只有 24h 内的新币，initialPriceEstimate 才是准的 (基于 24h 涨跌幅反推)
-                                    // 对于老币，这个倍数毫无意义 (是相对于 24h 前的价格)，直接置为 0 避免误导
-                                    const isGenesis = ageHours < 24;
-                                    const priceMultiple = isGenesis ? (meta.currentPrice / meta.initialPriceEstimate) : 0;
-
-                                    // 5. [核心修复] 重新定义“赢家”逻辑
-                                    let isCandidate = false;
-                                    let reason = "";
-
-                                    // 情况 A: 钻石手 (还持有 > 10%) - 逻辑不变，但要求更高
+                                    // 门槛：至少持有 10% 的原始仓位 (证明还在车上)
                                     if (retentionRate > 10) {
-                                        const holdValueUSD = parseFloat(ethers.utils.formatEther(currentBalance)) * meta.currentPrice;
+                                        // 计算 PnL (只基于剩余持仓 + 已实现部分，或者保守点只看剩余部分)
+                                        // 这里采用保守策略：如果 [剩余持仓价值] > [总成本 * 2]，那绝对是神
                                         
-                                        if (isGenesis) {
-                                            // 新币：看倍数 + 持仓
-                                            if (priceMultiple > 3.0 && holdValueUSD > 200) {
-                                                isCandidate = true;
-                                                reason = `💎 Diamond: ${priceMultiple.toFixed(1)}x | Bags: $${holdValueUSD.toFixed(0)}`;
-                                            }
-                                        } else {
-                                            // 老币：倍数不准，只看持仓价值 (硬门槛 $500)
-                                            // 逻辑：能拿住 $500 以上的老币，且总 PnL 为正，说明是稳健的持有者
-                                            if (holdValueUSD > 500) {
-                                                isCandidate = true;
-                                                reason = `💎 Diamond (Old): Bags $${holdValueUSD.toFixed(0)}`;
-                                            }
-                                        }
-                                    } 
-                                    // 情况 B: 止盈大师 (已清仓 或 持有 < 10%) - [新增逻辑]
-                                    else {
-                                        // 只有当该钱包进行了 "Legit Sell" (在 DEX 卖出) 时才算
-                                        // 这一步虽然费 RPC，但必须做，否则分不清是转账跑路还是卖出
-                                        const sellAudit = await checkLegitSell(
-                                            localProvider, 
-                                            remoteProvider, 
-                                            buyer, 
-                                            target.address, 
-                                            searchStart, 
-                                            searchEnd,
-                                            buyAmount
-                                        );
-
-                                        if (sellAudit.status === "YES") {
-                                            // 如果他卖了，我们很难算出具体每一笔的卖出价(太费资源)
-                                            // 但我们可以假设：如果他是一个长期盈利的钱包(Moralis PnL check)，
-                                            // 且他在这里卖出了，那大概率是赚的。
-                                            isCandidate = true;
-                                            reason = `Ck Sniper: Sold Out via DEX`;
-                                        }
-                                    }
-
-                                    // 6. 最终验证 (这一步不仅是 PnL 检查，更是为了确认 "Sold Out" 的人是不是真大佬)
-                                    if (isCandidate) {
-                                        // 调用 Moralis 查祖宗三代 (GMGN 风格)
-                                        const pnlPass = await checkWalletPnL(buyer);
+                                        const currentValueUSD = parseFloat(ethers.utils.formatEther(currentBalance)) * meta.currentPrice;
                                         
-                                        if (!pnlPass) {
-                                            // 虽然这把操作看着像赢了，但总账是亏的，或者是刷子 -> 剔除
-                                            // console.log(`      [Skip] ${buyer} failed global PnL check.`);
-                                        } else {
-                                            if (!walletHits[buyer]) {
-                                                walletHits[buyer] = { tokens: [], totalPnL: 0 };
-                                            }
+                                        // 成本计算：
+                                        // Genesis Mode: 使用 initialPriceEstimate
+                                        // Swing Mode: 理想情况用买入时价格，但没有API。
+                                        // 近似方案：Swing Mode 下，如果他买入后现在还在持有且价值很高，我们假设他是对的。
+                                        // 为了统一，我们这里还是用 initialPriceEstimate (注意：对老币这会偏低，导致 PnL 虚高，
+                                        // 但我们主要靠 retentionRate 和 audit 过滤)。
+                                        // *更优解*：对于老币，我们假设成本是当前价格的 50% (假设他是抄底的)，或者简单地只看持仓金额。
+                                        
+                                        const costPrice = isOldDog ? meta.currentPrice * 0.5 : meta.initialPriceEstimate;
+                                        const costBasisUSD = parseFloat(ethers.utils.formatEther(buyAmount)) * costPrice;
+
+                                        // 判定标准：
+                                        // 1. 还没卖完 (Retention > 10)
+                                        // 2. 账面浮盈 > 2倍总成本 (说明买的位置极好，或者拿得极久)
+                                        // 3. 或者是 Swing Mode 下的大额持仓者
+                                        
+                                        if (costBasisUSD > 0 && currentValueUSD > costBasisUSD * 2) {
+                                            if (!walletHits[buyer]) walletHits[buyer] = { tokens: [], totalPnL: 0 };
                                             walletHits[buyer].tokens.push(target.name);
+                                            walletHits[buyer].totalPnL += (currentValueUSD - costBasisUSD);
                                             hitCount++;
-
-                                            // 粗略估算 PnL (为了排序):
-                                            // 如果是持有者，用浮盈; 如果是卖出者，给一个固定权重(比如假设赚了$1000)或者忽略
-                                            const estimatedProfit = retentionRate > 10 
-                                                ? parseFloat(ethers.utils.formatEther(currentBalance)) * meta.currentPrice 
-                                                : 1000; // 卖出者默认给个权重，主要靠 hitCount 排序
-
-                                            walletHits[buyer].totalPnL += estimatedProfit;
-
-                                            console.log(`      [Legend] [${target.name}] ${buyer} | ${reason}`);
+                                            console.log(
+                                                `      [Legend] [${target.name}] Found Legend: ${buyer} (${(currentValueUSD / costBasisUSD).toFixed(1)}x)`,
+                                            );
                                         }
                                     }
                                 }),
                             );
 
                             // [Rate Limit] Add delay between batches to let CU bucket refill
-                            await new Promise((r) => setTimeout(r, 50)); // [付费版优化] 缩短等待时间
+                            await new Promise((r) => setTimeout(r, 1000));
                         }
                         console.log(
                             `   [Success] [${target.name}] Finished. Growth: ${tokenGrowth.toFixed(1)}x | Captured ${hitCount} snipers.`,
@@ -310,13 +275,12 @@ async function checkLegitSell(
     const tokenContract = new ethers.Contract(tokenAddress, LOG_ABI, localProvider); // 查余额用本地
 
     try {
-        // [优化] 优先检查本地余额。
+        // [优化] 优先检查本地余额。如果余额 >= 买入量，说明没卖，跳过远程日志查询
         const currentBalance = await withRetry(() => tokenContract.balanceOf(wallet) as Promise<ethers.BigNumber>).catch(
             () => ethers.BigNumber.from(0),
         );
 
-        // [修改] 只有余额 > 90% 买入量才算没卖 (容忍一点点磨损)
-        if (buyAmount && currentBalance.gte(buyAmount.mul(90).div(100))) {
+        if (buyAmount && currentBalance.gte(buyAmount)) {
             return { status: "NO_SELL", totalSold: ethers.BigNumber.from(0), currentBalance, lastSellBlock: 0 };
         }
 
@@ -419,16 +383,15 @@ async function getTokenMetadata(address: string, fallback?: number) {
                     initialPriceEstimate:
                         parseFloat(p.priceUsd || "0") /
                         (1 + parseFloat(p.priceChange?.h24 || "0") / 100),
-                    fdv: parseFloat(p.fdv || "0"), // [新增] FDV 用于过滤死狗
                 };
             }
         }
         return fallback
-            ? { createdAt: fallback * 1000, currentPrice: 0, initialPriceEstimate: 0.00001, fdv: 999999999 }
+            ? { createdAt: fallback * 1000, currentPrice: 0, initialPriceEstimate: 0.00001 }
             : null;
     } catch (e) {
         return fallback
-            ? { createdAt: fallback * 1000, currentPrice: 0, initialPriceEstimate: 0.00001, fdv: 999999999 }
+            ? { createdAt: fallback * 1000, currentPrice: 0, initialPriceEstimate: 0.00001 }
             : null;
     }
 }
@@ -508,7 +471,7 @@ async function getLogsInChunks(
             const logs = await getLogsInChunks(provider, i, end, address, topics);
             allLogs = allLogs.concat(logs);
             // [Rate Limit] Small delay between log chunks
-            await new Promise((r) => setTimeout(r, 10)); // [付费版优化] 几乎移除等待
+            await new Promise((r) => setTimeout(r, 200));
         }
         return allLogs;
     }
@@ -602,7 +565,7 @@ async function auditWallet(
             const delta = nonceNow - noncePast;
             // [修改] 只要不是死号即可，移除高频限制
             if (delta < 1) return { pass: false, reason: "Inactive" };
-            if (delta > CONFIG.FILTER_MAX_WEEKLY_TXS) return { pass: false, reason: "Freq" }; // [恢复] 过滤高频 Bot
+            // if (delta > CONFIG.FILTER_MAX_WEEKLY_TXS) return { pass: false, reason: "Freq" };
         } catch (e) {
             console.error(
                 `      [Warning] [Audit] RPC Error for ${address} at pastBlock: ${(e as any).message}`,
@@ -617,42 +580,69 @@ async function auditWallet(
 }
 
 function exportProfileData(walletHits: Record<string, { tokens: string[]; totalPnL: number }>): string[] {
-    console.log(`\n================ LEGENDARY SNIPERS FOUND ================`);
+    console.log(`\n================ 🏆 HALL OF FAME (STRICT MODE) 🏆 ================`);
     
-    // 定义段位计算函数
-    const getTier = (pnl: number) => {
-        if (pnl >= 50000) return "🐋 WHALE";
-        if (pnl >= 10000) return "🦈 SHARK";
-        if (pnl >= 2000)  return "🐬 DOLPHIN";
-        return "🐟 FISH";
+    // 1. [关键] 强制要求至少命中 2 个不同的狗
+    // 如果你只扫描了 5-10 个币，这个条件可能太苛刻会导致结果为空。
+    // 建议至少扫描 20-30 个热门币，然后开启这个过滤器。
+    const SERIAL_KILLER_THRESHOLD = 2; 
+
+    // 定义段位
+    const getTier = (pnl: number, hitCount: number) => {
+        if (hitCount >= 3) return "👑 KING"; // 命中3个以上，神级
+        if (pnl >= 10000) return "🐋 WHALE";
+        if (pnl >= 2000)  return "🦈 SHARK";
+        return "� FISH";
     };
 
-    const sorted = Object.entries(walletHits)
-        .filter(([_, data]) => data.tokens.length >= CONFIG.MIN_HIT_COUNT)
-        .sort((a, b) => b[1].totalPnL - a[1].totalPnL); // 按总 PnL 排序，而不是命中数
+    // 2. 转换数据并过滤
+    let candidates = Object.entries(walletHits)
+        .map(([wallet, data]) => ({
+            address: wallet,
+            tokens: [...new Set(data.tokens)], // 去重，防止同一个币买多次算多次
+            totalPnL: data.totalPnL,
+            hitCount: new Set(data.tokens).size
+        }))
+        .filter(c => {
+            // 规则 A: 必须命中至少 2 个不同的币 (证明不是运气)
+            if (c.hitCount >= SERIAL_KILLER_THRESHOLD) return true;
+            
+            // 规则 B: 如果只命中 1 个，那 PnL 必须巨大 (比如 > $20k) 且必须是已卖出止盈的 (避免死拿的 Insider)
+            // 这里我们暂时只用 PnL 过滤，假设 $20k 以上的单发选手也有一定参考价值
+            if (c.hitCount === 1 && c.totalPnL > 20000) return true;
 
-    const lines = [];
-    const richData = [];
+            return false; 
+        })
+        .sort((a, b) => {
+            // 3. [优化排序] 优先按“命中次数”排序，其次才是 PnL
+            // 一个赚 $5000 但命中了 3 个币的人，比赚 $50000 但只命中 1 个币的人更有跟单价值
+            if (b.hitCount !== a.hitCount) return b.hitCount - a.hitCount;
+            return b.totalPnL - a.totalPnL;
+        });
 
-    for (const [wallet, data] of sorted) {
-        const tier = getTier(data.totalPnL);
-        const line = `[${tier}] ${wallet} | PnL: +$${data.totalPnL.toFixed(0)} | Bags: ${data.tokens.join(", ")}`;
-        console.log(line);
-        lines.push(line);
-        
-        // 保存丰富数据结构
-        richData.push({ address: wallet, tier, pnl: data.totalPnL, tokens: data.tokens });
+    if (candidates.length === 0) {
+        console.log(`[Warning] No "Serial Killers" found. Try scanning MORE tokens to find overlapping wallets.`);
+        return [];
     }
 
-    const addresses = sorted.map(([wallet]) => wallet);
+    const lines = [];
+    
+    for (const c of candidates) {
+        const tier = getTier(c.totalPnL, c.hitCount);
+        const icon = c.hitCount >= 3 ? "🔥" : "🎯";
+        
+        // 格式化输出：突出显示命中次数
+        const line = `${icon} [${tier}] ${c.address} | Hits: ${c.hitCount} | PnL: +$${c.totalPnL.toFixed(0)} | Bags: ${c.tokens.join(", ")}`;
+        console.log(line);
+        lines.push(c.address);
+    }
 
+    // 保存结果
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
+    fs.writeFileSync(`${DATA_DIR}/legends_base.json`, JSON.stringify(candidates, null, 2));
+    console.log(`\n[Success] Saved ${candidates.length} Elite Traders to ${DATA_DIR}/legends_base.json`);
 
-    // [修改] 保存为包含 Tier 信息的丰富 JSON，方便人工查看
-    fs.writeFileSync(`${DATA_DIR}/legends_base.json`, JSON.stringify(richData, null, 2));
-    console.log(`\n[Success] Saved ${addresses.length} legends (with Tiers) to ${DATA_DIR}/legends_base.json`);
-
-    return addresses;
+    return lines;
 }
 
 if (require.main === module) {

@@ -61,6 +61,8 @@ export interface TrendingToken {
     address: string;
     fallbackTime: number;
     ageHours?: string;
+    volume?: number;
+    liquidity?: number;
 }
 
 // [新增] Moralis PnL 检查器 (GMGN 风格逻辑)

@@ -23,7 +23,12 @@ const TOKENS: Record<string, string> = {
     TOSHI: "0xac1bd2486aaf3b5c0fc3fd868558b082a531b2b4",
     LUMIO: "0x0b62372a392b92440360a760670929949704772b",
     KEYCAT: "0x9a26f5433671751c3276a065f57e5a02d281797d",
-    MOG: "0x2Da56AcB9Ea78330f947bD57C54119Debda7AF71"
+    MOG: "0x2Da56AcB9Ea78330f947bD57C54119Debda7AF71",
+    TYBG: "0x0d97F261b1e88845184f678e2d1e7a98D9FD38dE",
+    DOGINME: "0x6921B130D297cc43754afba22e5EAc0FBf8Db75b",
+    MOCHI: "0xF6e932Ca12afa26665dC4dDE7e27be02A7c02e50",
+    BLOO: "0x57e114B691Db790C35207b2e685D4A69cd48782C",
+    SKI: "0x07ac5529022243723329D8135114b9e8C84d747b"
 };
 
 // [新增] API 挂掉时的保底价格 (估值，确保不会被当成 $0)
@@ -34,7 +39,12 @@ const FALLBACK_PRICES: Record<string, number> = {
     [TOKENS.SEKOIA]: 0.02, // 保底价
     [TOKENS.CLANKER]: 50,  // 保底价
     [TOKENS.GAME]: 0.005,
-    [TOKENS.USDC]: 1.0
+    [TOKENS.USDC]: 1.0,
+    [TOKENS.TYBG]: 0.0002,
+    [TOKENS.DOGINME]: 0.0004,
+    [TOKENS.MOCHI]: 0.00001,
+    [TOKENS.BLOO]: 15.0,
+    [TOKENS.SKI]: 0.02
 };
 
 const provider = new ethers.providers.JsonRpcProvider(LOCAL_RPC_URL);
@@ -208,11 +218,7 @@ async function loadCandidates(): Promise<string[]> {
     // [修改] 优先读取新的 JSON 格式
     if (fs.existsSync(`${DATA_DIR}/legends_base.json`)) {
         const content = fs.readFileSync(`${DATA_DIR}/legends_base.json`, "utf-8");
-        const data = JSON.parse(content);
-        // [兼容性更新] 支持读取 { address, tier, ... } 对象数组或纯字符串数组
-        if (Array.isArray(data)) {
-            return data.map((item: any) => typeof item === 'string' ? item : item.address);
-        }
+        return JSON.parse(content);
     }
     
     return [];
