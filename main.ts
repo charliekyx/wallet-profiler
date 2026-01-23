@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import Moralis from "moralis";
 import { DATA_DIR } from "./src/common";
 import { fetchTrending } from "./src/fetch_trending";
 import { profileEarlyBuyers } from "./src/profile";
@@ -17,6 +18,13 @@ process.on('unhandledRejection', (reason) => {
 
 async function main() {
     console.log(`[System] Starting Golden Dog Hunter Pipeline`);
+
+    // [新增] 初始化 Moralis (请替换为你的 API Key)
+    // 免费 Key 获取: https://admin.moralis.io/
+    try {
+        await Moralis.start({ apiKey: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub25jZSI6IjcwZGZmMmE5LWY3YjQtNDkwOC1hODFkLWI0NjU5YzcyNjI3YSIsIm9yZ0lkIjoiNDkzNjU3IiwidXNlcklkIjoiNTA3OTgyIiwidHlwZUlkIjoiOWJmYTQxYzAtODI1MC00YTI3LWE1ZmQtMGZjMTliYjZmZjA1IiwidHlwZSI6IlBST0pFQ1QiLCJpYXQiOjE3NjkxNTc1OTksImV4cCI6NDkyNDkxNzU5OX0.Ot_C_0RoOwmkiFBvmJHTMV3jKtzxhlkIGycTejMdEZg" });
+        console.log("[System] Moralis initialized.");
+    } catch (e) { console.log("[System] Moralis init skipped (Check API Key)."); }
 
     if (!fs.existsSync(DATA_DIR)) {
         fs.mkdirSync(DATA_DIR);

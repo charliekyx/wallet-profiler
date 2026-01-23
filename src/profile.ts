@@ -11,6 +11,7 @@ import {
     PROFILE_CONFIG as CONFIG,
     DEX_ROUTERS,
     TrendingToken,
+    checkWalletPnL,
 } from "./common";
 
 // ================= [Configuration V4: Smart Speed] =================
@@ -150,58 +151,55 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                     if (!buyerData) return;
                                     const { amount: buyAmount, firstBlock: firstBuyBlock } = buyerData;
 
-                                    // 2. 检查卖出行为与 PnL
-                                    const sellInfo = await checkLegitSell(
-                                        localProvider,
-                                        remoteProvider,
-                                        buyer,
-                                        target.address,
-                                        firstBuyBlock, // [优化] 仅从买入块开始检查卖出，节省 99% RPC
-                                        currentBlock,
-                                        buyAmount
-                                    );
-                                    if (sellInfo.status === "SUSPICIOUS") {
-                                        globalBlacklist.add(buyer);
-                                        return;
-                                    }
+                                    // 1. 基础审计：如果买得太少（比如 < 0.05 ETH），直接忽略，不够 Gas 费的
+                                    if (buyAmount.lt(ethers.utils.parseEther("0.05"))) return;
 
-                                    // ================= [The Paper Hand Fix] =================
-                                    // 逻辑：不要只看卖了多少，要看剩了多少。
-                                    // 只有当 retentionRate > 10% 时，才计算 PnL。
-                                    // 这样过滤掉了所有"卖飞"的人。
+                                    // 2. 获取当前余额 (本地 RPC 极快)
+                                    const tokenContract = new ethers.Contract(target.address, LOG_ABI, localProvider);
+                                    const currentBalance = await withRetry(() => tokenContract.balanceOf(buyer) as Promise<ethers.BigNumber>).catch(() => ethers.BigNumber.from(0));
 
-                                    const currentBalance = sellInfo.currentBalance;
-                                    
-                                    // 计算持仓率 (0-100)
+                                    // 3. 计算“剩了多少” (Retention Rate)
+                                    // 这是比 PnL 更重要的指标。如果他卖了 99%，说明他没信心。
                                     let retentionRate = 0;
-                                    if (buyAmount.gt(0)) {
+                                    if (!buyAmount.isZero()) {
                                         retentionRate = currentBalance.mul(100).div(buyAmount).toNumber();
                                     }
 
-                                    // 门槛：至少持有 10% 的原始仓位 (证明还在车上)
-                                    if (retentionRate > 10) {
-                                        // 计算 PnL (只基于剩余持仓 + 已实现部分，或者保守点只看剩余部分)
-                                        // 这里采用保守策略：如果 [剩余持仓价值] > [总成本 * 2]，那绝对是神
-                                        
-                                        const currentValueUSD = parseFloat(ethers.utils.formatEther(currentBalance)) * meta.currentPrice;
-                                        
-                                        // 成本计算：
-                                        // Genesis Mode: 使用 initialPriceEstimate
-                                        // Swing Mode: 理想情况用买入时价格，但没有API。
-                                        // 近似方案：Swing Mode 下，如果他买入后现在还在持有且价值很高，我们假设他是对的。
-                                        // 为了统一，我们这里还是用 initialPriceEstimate (注意：对老币这会偏低，导致 PnL 虚高，
-                                        // 但我们主要靠 retentionRate 和 audit 过滤)。
-                                        // *更优解*：对于老币，我们假设成本是当前价格的 50% (假设他是抄底的)，或者简单地只看持仓金额。
-                                        
-                                        const costPrice = isOldDog ? meta.currentPrice * 0.5 : meta.initialPriceEstimate;
-                                        const costBasisUSD = parseFloat(ethers.utils.formatEther(buyAmount)) * costPrice;
+                                    // 4. 逻辑分流：
+                                    // 情况 A: 他卖了一些，但必须看他是不是卖飞了
+                                    // 情况 B: 他完全没卖 (Diamond Hand)，这是极其珍贵的样本
 
-                                        // 判定标准：
-                                        // 1. 还没卖完 (Retention > 10)
-                                        // 2. 账面浮盈 > 2倍总成本 (说明买的位置极好，或者拿得极久)
-                                        // 3. 或者是 Swing Mode 下的大额持仓者
-                                        
-                                        if (costBasisUSD > 0 && currentValueUSD > costBasisUSD * 2) {
+                                    // 计算浮盈倍数 (当前币价 / 初始估算价)
+                                    // 注意：meta.initialPriceEstimate 对于老币可能不准，但对于新币（Genesis Mode）很准
+                                    const priceMultiple = meta.currentPrice / meta.initialPriceEstimate;
+                                    
+                                    let isLegend = false;
+                                    let pnlDetails = "";
+
+                                    // 【核心修改】判定标准：允许“只买不卖”
+                                    if (retentionRate > 10) { // 至少还得持有 10% 的仓位，否则就是卖飞党
+                                        // 如果币价涨了 2 倍，且他还在车上，就是赢家
+                                        if (priceMultiple > 2.0) {
+                                            // 进一步检查：他的持仓价值是否够大？(比如 > $500)
+                                            const holdValueUSD = parseFloat(ethers.utils.formatEther(currentBalance)) * meta.currentPrice;
+                                            
+                                            if (holdValueUSD > 500) {
+                                                isLegend = true;
+                                                pnlDetails = `Hold: $${holdValueUSD.toFixed(0)} | Multiple: ${priceMultiple.toFixed(1)}x`;
+                                            }
+                                        }
+                                    }
+
+                                    // 如果判定为 Legend，再进行昂贵的 Moralis 检查
+                                    if (isLegend) {
+                                        // 【新增】GMGN 风格的 PnL 检查
+                                        const pnlPass = await checkWalletPnL(buyer);
+                                        if (!pnlPass) {
+                                            console.log(`      [Skip] ${buyer} has negative global PnL (Moralis).`);
+                                            return;
+                                        }
+
+                                        if (isLegend) {
                                             if (!walletHits[buyer]) {
                                                 walletHits[buyer] = { tokens: [], totalPnL: 0 };
                                             }
@@ -209,15 +207,15 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                             
                                             hitCount++;
 
-                                            // [优化] 计算具体 PnL 指标
-                                            const roi = currentValueUSD / costBasisUSD;
-                                            const unrealizedPnL = currentValueUSD - costBasisUSD;
+                                            // 估算 PnL (仅供排序)
+                                            const holdValueUSD = parseFloat(ethers.utils.formatEther(currentBalance)) * meta.currentPrice;
+                                            const unrealizedPnL = holdValueUSD; // 简化：假设全是利润 (因为倍数很高)
 
                                             // 累加 PnL 到总成绩
                                             walletHits[buyer].totalPnL += unrealizedPnL;
 
                                             console.log(
-                                                `      [Legend] [${target.name}] Found Legend: ${buyer} | ROI: ${roi.toFixed(1)}x | PnL: +$${unrealizedPnL.toFixed(0)} (Hold: $${currentValueUSD.toFixed(0)})`,
+                                                `      [Legend] [${target.name}] Found Diamond: ${buyer} | ${pnlDetails}`,
                                             );
                                         }
                                     }
@@ -571,7 +569,7 @@ async function auditWallet(
             const delta = nonceNow - noncePast;
             // [修改] 只要不是死号即可，移除高频限制
             if (delta < 1) return { pass: false, reason: "Inactive" };
-            // if (delta > CONFIG.FILTER_MAX_WEEKLY_TXS) return { pass: false, reason: "Freq" };
+            if (delta > CONFIG.FILTER_MAX_WEEKLY_TXS) return { pass: false, reason: "Freq" }; // [恢复] 过滤高频 Bot
         } catch (e) {
             console.error(
                 `      [Warning] [Audit] RPC Error for ${address} at pastBlock: ${(e as any).message}`,

@@ -1,4 +1,5 @@
 import * as path from "path";
+import Moralis from "moralis";
 
 // 使用 path.resolve 确保路径是绝对路径，避免因运行目录不同导致找不到文件
 export const DATA_DIR = path.resolve(__dirname, "../data");
@@ -15,8 +16,8 @@ export const PROFILE_CONFIG = {
     LOOKBACK_BUFFER_BLOCKS: 3000,
     FILTER_MAX_TOTAL_NONCE: 15000,
     FILTER_RECENT_DAYS: 7,
-    FILTER_MIN_WEEKLY_TXS: 2, // 设置为 2，强制要求过去 14 天至少有 1 笔交易
-    FILTER_MAX_WEEKLY_TXS: 300,
+    FILTER_MIN_WEEKLY_TXS: 2,
+    FILTER_MAX_WEEKLY_TXS: 150, // [优化] 下调至 150 (约 20 tx/day)，过滤高频 Bot/Spammer
     MIN_PNL_MULTIPLIER: 2.0,
 
     // [加速配置]
@@ -60,4 +61,36 @@ export interface TrendingToken {
     address: string;
     fallbackTime: number;
     ageHours?: string;
+}
+
+// [新增] Moralis PnL 检查器 (GMGN 风格逻辑)
+export async function checkWalletPnL(address: string): Promise<boolean> {
+    try {
+        // 调用 Moralis 获取钱包盈利概况 (支持 Base 链)
+        // 注意：需确保 main.ts 中已调用 Moralis.start()
+        const response = await Moralis.EvmApi.wallets.getWalletProfitabilitySummary({
+            chain: "0x2105", // Base Chain ID (8453 in hex)
+            address: address,
+        });
+
+        const data = response.raw;
+        
+        // Moralis 返回的字段
+        const realizedProfit = parseFloat(data.total_realized_profit_usd || "0");
+        const buys = Number(data.total_buys || 0);
+        const sells = Number(data.total_sells || 0);
+
+        // 【GMGN 逻辑复刻】
+        // 1. 必须是正收益 (Realized PnL > 0)
+        // 2. 必须有交易活跃度 (Buys + Sells > 5)
+        if (realizedProfit > 0 && (buys + sells) > 5) {
+            return true; 
+        }
+        
+        return false;
+    } catch (e) {
+        // 如果 API 报错或超限，默认放行 (Fail Open)，以免误杀
+        // console.log("Moralis check failed, skipping PnL check");
+        return true; 
+    }
 }
