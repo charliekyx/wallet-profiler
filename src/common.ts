@@ -20,9 +20,9 @@ export const PROFILE_CONFIG = {
     MIN_PNL_MULTIPLIER: 2.0,
 
     // [加速配置]
-    VERIFY_BATCH_SIZE: 20, // [付费版优化] 提升并发验证数 (200 RPS 足够支撑)
-    CONCURRENT_TOKENS: 5, // [付费版优化] 同时处理更多 Token
-    RPC_CHUNK_SIZE: 2000, // [付费版优化] 大幅增加日志查询范围 (减少请求次数)
+    VERIFY_BATCH_SIZE: 50, // [付费版优化] 提升并发验证数 (4000 CU/s 足够支撑)
+    CONCURRENT_TOKENS: 10, // [付费版优化] 同时处理更多 Token
+    RPC_CHUNK_SIZE: 10000, // [付费版优化] 大幅增加日志查询范围 (减少请求次数)
 };
 
 // Base 常见 DEX 路由地址 (用于识别 Legit Sell)

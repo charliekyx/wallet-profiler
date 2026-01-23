@@ -123,10 +123,6 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                         const buyerList = Array.from(buyersMap.keys());
                         const pastBlock = currentBlock - 43200 * CONFIG.FILTER_RECENT_DAYS;
 
-                        // 智能计算起始区块 (45天或代币出生日)
-                        const lookbackBlocks = 2000000;
-                        const startCheckBlock = Math.max(0, currentBlock - lookbackBlocks);
-
                         let hitCount = 0;
 
                         // [核心优化] 针对每一个 wallet 进行深度审计
@@ -160,7 +156,7 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                         remoteProvider,
                                         buyer,
                                         target.address,
-                                        startCheckBlock,
+                                        firstBuyBlock, // [优化] 仅从买入块开始检查卖出，节省 99% RPC
                                         currentBlock,
                                         buyAmount
                                     );
