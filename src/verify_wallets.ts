@@ -208,7 +208,11 @@ async function loadCandidates(): Promise<string[]> {
     // [修改] 优先读取新的 JSON 格式
     if (fs.existsSync(`${DATA_DIR}/legends_base.json`)) {
         const content = fs.readFileSync(`${DATA_DIR}/legends_base.json`, "utf-8");
-        return JSON.parse(content);
+        const data = JSON.parse(content);
+        // [兼容性更新] 支持读取 { address, tier, ... } 对象数组或纯字符串数组
+        if (Array.isArray(data)) {
+            return data.map((item: any) => typeof item === 'string' ? item : item.address);
+        }
     }
     
     return [];

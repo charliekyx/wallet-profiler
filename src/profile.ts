@@ -36,7 +36,7 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
         process.exit(1);
     }
 
-    const walletHits: Record<string, string[]> = {};
+    const walletHits: Record<string, { tokens: string[]; totalPnL: number }> = {};
     
     // [优化] 持久化黑名单加载
     let globalBlacklist = new Set<string>();
@@ -202,11 +202,22 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                         // 3. 或者是 Swing Mode 下的大额持仓者
                                         
                                         if (costBasisUSD > 0 && currentValueUSD > costBasisUSD * 2) {
-                                            if (!walletHits[buyer]) walletHits[buyer] = [];
-                                            walletHits[buyer].push(target.name);
+                                            if (!walletHits[buyer]) {
+                                                walletHits[buyer] = { tokens: [], totalPnL: 0 };
+                                            }
+                                            walletHits[buyer].tokens.push(target.name);
+                                            
                                             hitCount++;
+
+                                            // [优化] 计算具体 PnL 指标
+                                            const roi = currentValueUSD / costBasisUSD;
+                                            const unrealizedPnL = currentValueUSD - costBasisUSD;
+
+                                            // 累加 PnL 到总成绩
+                                            walletHits[buyer].totalPnL += unrealizedPnL;
+
                                             console.log(
-                                                `      [Legend] [${target.name}] Found Legend: ${buyer} (${(currentValueUSD / costBasisUSD).toFixed(1)}x)`,
+                                                `      [Legend] [${target.name}] Found Legend: ${buyer} | ROI: ${roi.toFixed(1)}x | PnL: +$${unrealizedPnL.toFixed(0)} (Hold: $${currentValueUSD.toFixed(0)})`,
                                             );
                                         }
                                     }
@@ -574,25 +585,41 @@ async function auditWallet(
     }
 }
 
-function exportProfileData(walletHits: Record<string, string[]>): string[] {
+function exportProfileData(walletHits: Record<string, { tokens: string[]; totalPnL: number }>): string[] {
     console.log(`\n================ LEGENDARY SNIPERS FOUND ================`);
+    
+    // 定义段位计算函数
+    const getTier = (pnl: number) => {
+        if (pnl >= 50000) return "🐋 WHALE";
+        if (pnl >= 10000) return "🦈 SHARK";
+        if (pnl >= 2000)  return "🐬 DOLPHIN";
+        return "🐟 FISH";
+    };
+
     const sorted = Object.entries(walletHits)
-        .filter(([_, hits]) => hits.length >= CONFIG.MIN_HIT_COUNT)
-        .sort((a, b) => b[1].length - a[1].length);
+        .filter(([_, data]) => data.tokens.length >= CONFIG.MIN_HIT_COUNT)
+        .sort((a, b) => b[1].totalPnL - a[1].totalPnL); // 按总 PnL 排序，而不是命中数
+
     const lines = [];
-    for (const [wallet, hits] of sorted) {
-        const line = `[${hits.length} Legends] ${wallet} | Bags: ${hits.join(", ")}`;
+    const richData = [];
+
+    for (const [wallet, data] of sorted) {
+        const tier = getTier(data.totalPnL);
+        const line = `[${tier}] ${wallet} | PnL: +$${data.totalPnL.toFixed(0)} | Bags: ${data.tokens.join(", ")}`;
         console.log(line);
         lines.push(line);
+        
+        // 保存丰富数据结构
+        richData.push({ address: wallet, tier, pnl: data.totalPnL, tokens: data.tokens });
     }
 
     const addresses = sorted.map(([wallet]) => wallet);
 
     if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
 
-    // [修改] 保存为 JSON 格式作为中间文件
-    fs.writeFileSync(`${DATA_DIR}/legends_base.json`, JSON.stringify(addresses, null, 2));
-    console.log(`\n[Success] Saved ${addresses.length} legends to ${DATA_DIR}/legends_base.json`);
+    // [修改] 保存为包含 Tier 信息的丰富 JSON，方便人工查看
+    fs.writeFileSync(`${DATA_DIR}/legends_base.json`, JSON.stringify(richData, null, 2));
+    console.log(`\n[Success] Saved ${addresses.length} legends (with Tiers) to ${DATA_DIR}/legends_base.json`);
 
     return addresses;
 }
