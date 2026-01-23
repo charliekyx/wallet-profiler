@@ -5,9 +5,8 @@ export const DATA_DIR = path.resolve(__dirname, "../data");
 export const BLACKLIST_FILE = path.join(DATA_DIR, "blacklist.json");
 
 export const LOCAL_RPC_URL = "http://127.0.0.1:8545";
-export const ALCHEMY_API_KEY = "Dy8qDdgHXfCqzP-o1Bw2X";
-export const ALCHEMY_BASE_RPC_URL = `https://base-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}`;
-export const REMOTE_RPC_URL = ALCHEMY_BASE_RPC_URL;
+// export const ALCHEMY_API_KEY = "https://base-mainnet.g.alchemy.com/v2/Dy8qDdgHXfCqzP-o1Bw2X";
+export const REMOTE_RPC_URL = `https://base-mainnet.infura.io/v3/d424eb23626d4adfade73a662f9d2f19`;;
 
 export const PROFILE_CONFIG = {
     MIN_HIT_COUNT: 1,
@@ -21,9 +20,9 @@ export const PROFILE_CONFIG = {
     MIN_PNL_MULTIPLIER: 2.0,
 
     // [加速配置]
-    VERIFY_BATCH_SIZE: 2, // 降低并发，防止触发 Alchemy/Infura 429 限流 (Free Tier safe: 2)
-    CONCURRENT_TOKENS: 2, // 降低并发 (Process 1 token at a time)
-    RPC_CHUNK_SIZE: 10, // RPC 分片大小 (Free Tier limit is 10 blocks)
+    VERIFY_BATCH_SIZE: 20, // [付费版优化] 提升并发验证数 (200 RPS 足够支撑)
+    CONCURRENT_TOKENS: 5, // [付费版优化] 同时处理更多 Token
+    RPC_CHUNK_SIZE: 2000, // [付费版优化] 大幅增加日志查询范围 (减少请求次数)
 };
 
 // Base 常见 DEX 路由地址 (用于识别 Legit Sell)

@@ -1,16 +1,9 @@
-import { Network, Alchemy, AssetTransfersCategory, SortingOrder } from "alchemy-sdk";
-import * as fs from "fs";
 import { ethers } from "ethers";
-import { DATA_DIR, ALCHEMY_API_KEY, DEX_ROUTERS } from "./common";
+import * as fs from "fs";
+import { DATA_DIR, REMOTE_RPC_URL } from "./common";
 
 // ================= 配置区域 =================
 const CHECK_DAYS = 7; // 只看最近 7 天的操作
-
-const settings = {
-    apiKey: ALCHEMY_API_KEY,
-    network: Network.BASE_MAINNET,
-};
-const alchemy = new Alchemy(settings);
 
 export async function findActiveTraders(inputCandidates?: string[]) {
     console.log("[System] Starting Active Trader Filter...");
@@ -41,10 +34,12 @@ export async function findActiveTraders(inputCandidates?: string[]) {
 
     console.log(`Analyzing activity for ${candidates.length} whales...`);
 
+    const provider = new ethers.providers.StaticJsonRpcProvider(REMOTE_RPC_URL);
+
     // 计算区块范围 (Base 2秒一个块)
-    const currentBlock = await alchemy.core.getBlockNumber();
+    const currentBlock = await provider.getBlockNumber();
     const blocksPerDay = 43200;
-    const fromBlock = "0x" + (currentBlock - blocksPerDay * CHECK_DAYS).toString(16);
+    const startBlock = currentBlock - blocksPerDay * CHECK_DAYS;
 
     const activeHunters = [];
     const sleepingWhales = [];
@@ -55,50 +50,21 @@ export async function findActiveTraders(inputCandidates?: string[]) {
             `\r   Scanning ${i + 1}/${candidates.length}: ${wallet.slice(0, 6)}...`,
         );
 
-        // 查询该钱包发出的交易 (External + ERC20)
-        const resp = await alchemy.core.getAssetTransfers({
-            fromBlock: fromBlock,
-            fromAddress: wallet,
-            category: [AssetTransfersCategory.EXTERNAL, AssetTransfersCategory.ERC20],
-            excludeZeroValue: true,
-            order: SortingOrder.DESCENDING, // 最新的在前
-            maxCount: 20, // 只看最近 20 笔，足够判断了
-        });
+        try {
+            // [RPC 优化] 使用 Nonce 差值判断活跃度 (需要 Archive Node)
+            // 这种方式不依赖 Alchemy SDK，且速度极快，完全解耦
+            const nonceNow = await provider.getTransactionCount(wallet, "latest");
+            const nonceOld = await provider.getTransactionCount(wallet, startBlock);
+            
+            const delta = nonceNow - nonceOld;
 
-        const txs = resp.transfers;
-
-        if (txs.length === 0) {
-            sleepingWhales.push({ address: wallet, reason: "No Tx in 7 days" });
-            continue;
-        }
-
-        let isHunter = false;
-        let lastAction = "";
-
-        // 分析交易行为
-        for (const tx of txs) {
-            const to = (tx.to || "").toLowerCase();
-
-            // 行为 1: 给 DEX Router 发 ETH 或 Token -> 这是一个 Swap 信号
-            if (DEX_ROUTERS.has(to)) {
-                isHunter = true;
-                lastAction = `Swapped on DEX (${tx.asset})`;
-                break;
+            if (delta > 0) {
+                activeHunters.push({ address: wallet, action: `Active (+${delta} txs)` });
+            } else {
+                sleepingWhales.push({ address: wallet, reason: "No Tx in 7 days" });
             }
-
-            // 行为 2: 转出 USDT/USDC/ETH 到普通合约 (可能是买土狗)
-            if (["USDC", "USDT", "ETH", "WETH"].includes(tx.asset || "") && !DEX_ROUTERS.has(to)) {
-                // 这里可以进一步调 API 查 to 是不是 Token 合约，为了速度暂且放宽
-                isHunter = true;
-                lastAction = `Sent ${tx.asset} (Potential Buy)`;
-                break;
-            }
-        }
-
-        if (isHunter) {
-            activeHunters.push({ address: wallet, action: lastAction });
-        } else {
-            sleepingWhales.push({ address: wallet, reason: "Only passive transfers / No buys" });
+        } catch (e) {
+            console.log(`\n[Error] Check failed for ${wallet}: ${(e as any).message}`);
         }
     }
 

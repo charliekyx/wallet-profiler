@@ -218,7 +218,7 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                             );
 
                             // [Rate Limit] Add delay between batches to let CU bucket refill
-                            await new Promise((r) => setTimeout(r, 1000));
+                            await new Promise((r) => setTimeout(r, 50)); // [付费版优化] 缩短等待时间
                         }
                         console.log(
                             `   [Success] [${target.name}] Finished. Growth: ${tokenGrowth.toFixed(1)}x | Captured ${hitCount} snipers.`,
@@ -470,7 +470,7 @@ async function getLogsInChunks(
             const logs = await getLogsInChunks(provider, i, end, address, topics);
             allLogs = allLogs.concat(logs);
             // [Rate Limit] Small delay between log chunks
-            await new Promise((r) => setTimeout(r, 200));
+            await new Promise((r) => setTimeout(r, 10)); // [付费版优化] 几乎移除等待
         }
         return allLogs;
     }
