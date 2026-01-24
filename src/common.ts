@@ -7,7 +7,7 @@ export const BLACKLIST_FILE = path.join(DATA_DIR, "blacklist.json");
 
 export const LOCAL_RPC_URL = "http://127.0.0.1:8545";
 // export const ALCHEMY_API_KEY = "https://base-mainnet.g.alchemy.com/v2/Dy8qDdgHXfCqzP-o1Bw2X";
-export const REMOTE_RPC_URL = `https://base-mainnet.infura.io/v3/d424eb23626d4adfade73a662f9d2f19`;;
+export const REMOTE_RPC_URL = `https://base-mainnet.infura.io/v3/d424eb23626d4adfade73a662f9d2f19`;
 
 export const PROFILE_CONFIG = {
     MIN_HIT_COUNT: 1,

@@ -109,7 +109,7 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
 
                     // 2. 扫描买家 (通用逻辑)
                     const buyersMap = await scanBuyers(
-                        remoteProvider,
+                        localProvider, // [修复] 切换到本地节点查日志 (速度快且免费)
                         target.address,
                         searchStart,
                         searchEnd
@@ -157,7 +157,7 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                     // 2. 检查卖出行为与 PnL
                                     const sellInfo = await checkLegitSell(
                                         localProvider,
-                                        remoteProvider,
+                                        localProvider, // [修复] 切换到本地节点查个人日志
                                         buyer,
                                         target.address,
                                         startCheckBlock,
@@ -566,11 +566,20 @@ async function auditWallet(
             // [修改] 只要不是死号即可，移除高频限制
             if (delta < 1) return { pass: false, reason: "Inactive" };
             // if (delta > CONFIG.FILTER_MAX_WEEKLY_TXS) return { pass: false, reason: "Freq" };
-        } catch (e) {
+        } catch (e: any) {
+            // [新增] 容错处理：如果 Infura 挂了/限流了/本地节点不支持历史，直接放行
+            // 我们已经查了当前 Nonce 和余额，这已经过滤掉了大部分垃圾号
+            const msg = (e.message || "").toLowerCase();
+            if (msg.includes("429") || msg.includes("limit") || msg.includes("credit") || msg.includes("missing trie")) {
+                // console.log(`      [Audit] Skip history check (RPC Limit/No Archive)`);
+                return { pass: true, reason: "SkipHist" };
+            }
+
             console.error(
                 `      [Warning] [Audit] RPC Error for ${address} at pastBlock: ${(e as any).message}`,
             );
-            return { pass: false, reason: "RPC" };
+            // 默认放行，防止因网络波动漏掉大佬
+            return { pass: true, reason: "RPC_Skip" };
         }
         return { pass: true, reason: "OK" };
     } catch (e) {
