@@ -177,13 +177,15 @@ export async function profileEarlyBuyers(inputTargets?: TrendingToken[]): Promis
                                     const currentBalance = sellInfo.currentBalance;
                                     
                                     // 计算持仓率 (0-100)
-                                    let retentionRate = 0;
+                                    let passesRetention = false;
                                     if (buyAmount.gt(0)) {
-                                        retentionRate = currentBalance.mul(100).div(buyAmount).toNumber();
+                                        // Check if retention > 10% (currentBalance * 10 > buyAmount)
+                                        // Avoids .toNumber() overflow on large balances
+                                        if (currentBalance.mul(10).gt(buyAmount)) passesRetention = true;
                                     }
 
                                     // 门槛：至少持有 10% 的原始仓位 (证明还在车上)
-                                    if (retentionRate > 10) {
+                                    if (passesRetention) {
                                         // 计算 PnL (只基于剩余持仓 + 已实现部分，或者保守点只看剩余部分)
                                         // 这里采用保守策略：如果 [剩余持仓价值] > [总成本 * 2]，那绝对是神
                                         
